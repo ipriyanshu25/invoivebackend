@@ -412,7 +412,7 @@ class BasicSalarySlipPDF(FPDF):
         
         # Line break after header
         self.ln(5)
-
+ 
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
