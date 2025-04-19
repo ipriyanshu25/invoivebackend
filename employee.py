@@ -1,11 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify,Blueprint, send_file
 from flask_pymongo import PyMongo
 from bson import ObjectId
 from datetime import datetime
 from db import db
+from salaryslip import SalarySlipGenerator
 
-app = Flask(__name__)
 employees_collection = db["employees"]
+employee_bp = Blueprint('employee', __name__,url_prefix='/employees')
 
 # Helper function for formatting consistent responses
 def format_response(success, message, data=None, status_code=200):
@@ -29,7 +30,7 @@ def generate_unique_employee_id():
 
 
 
-@app.route('/add_employee', methods=['POST'])
+@employee_bp.route('/add_employee', methods=['POST'])
 def add_employee():
     try:
         data = request.get_json()
@@ -103,7 +104,7 @@ def add_employee():
         return format_response(False, str(e), status_code=500)
 
 
-@app.route('/getemp/<employee_id>', methods=['GET'])
+@employee_bp.route('/getemp/<employee_id>', methods=['GET'])
 def get_employee(employee_id):
     try:
         employee = employees_collection.find_one({"_id": ObjectId(employee_id)})
@@ -131,7 +132,7 @@ def get_employee(employee_id):
     except Exception as e:
         return format_response(False, str(e), status_code=500)
 
-@app.route('/update/<employee_id>', methods=['PUT'])
+@employee_bp.route('/update/<employee_id>', methods=['PUT'])
 def update_employee(employee_id):
     try:
         data = request.get_json()
@@ -158,7 +159,7 @@ def update_employee(employee_id):
     except Exception as e:
         return format_response(False, str(e), status_code=500)
 
-@app.route('/getall', methods=['GET'])
+@employee_bp.route('/getall', methods=['GET'])
 def get_all_employees():
     try:
         employees = employees_collection.find()
@@ -187,6 +188,36 @@ def get_all_employees():
 
     except Exception as e:
         return format_response(False, str(e), status_code=500)
+    
+@employee_bp.route('/get_salary_slip/<employee_id>', methods=['GET'])
+def get_salary_slip(employee_id):
+    emp = employees_collection.find_one({'employeeId': employee_id})
+    if not emp:
+        return jsonify({'success': False, 'message': 'Employee not found'}), 404
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    # Prepare data for slip
+    emp_data = {
+        'full_name': emp.get('name'),
+        'doj': datetime.strptime(emp.get('date_of_joining'), '%Y-%m-%d').strftime('%d-%m-%Y'),
+        'salary_structure': [
+            {'name': 'Basic Pay', 'amount': emp.get('monthly_salary')}
+        ],
+        'lop': int(request.args.get('lop', 0)),
+        'designation': emp.get('designation', ''),
+        'department': emp.get('department', ''),
+        'emp_no': emp.get('employeeId'),
+        'bank_account': emp.get('bank_details', {}).get('account_number', ''),
+        'pan': emp.get('pan_number'),
+        'company_name': 'Enoylity Studio'
+    }
+
+    generator = SalarySlipGenerator(emp_data, current_date=request.args.get('current_date'))
+    pdf_buf = generator.generate_pdf()
+    return send_file(
+        pdf_buf,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=f"salary_slip_{employee_id}.pdf"
+    )
+
+

@@ -4,6 +4,7 @@ from fpdf import FPDF
 from PIL import Image
 from pymongo import MongoClient
 from db import db
+import requests
 
 app = Flask(__name__)
 
@@ -18,12 +19,30 @@ COMPANY_DETAILS = {
     'company_phone': '1234567890',
     'website': 'www.mhdtech.com'  
 }
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+LOGO_URL = 'https://www.enoylitystudio.com/wp-content/uploads/2024/02/enoylity-final-logo.png'
+LOGO_FILENAME = 'enoylity-final-logo.png'
+LOGO_PATH = os.path.join(ASSETS_DIR, LOGO_FILENAME)
+
+# Ensure assets dir exists
+os.makedirs(ASSETS_DIR, exist_ok=True)
+
+# Download logo if we don’t have it yet
+if not os.path.isfile(LOGO_PATH):
+    try:
+        resp = requests.get(LOGO_URL, timeout=5)
+        resp.raise_for_status()
+        with open(LOGO_PATH, 'wb') as f:
+            f.write(resp.content)
+    except Exception as e:
+        print(f"Warning: could not fetch logo – {e}")
 
 class InvoicePDF(FPDF):
     def __init__(self):
         super().__init__()
         # Store invoice data for use in header/footer
         self.invoice_data = None
+        self.logo_path = LOGO_PATH if os.path.isfile(LOGO_PATH) else None
         # Colors
         self.light_blue = (235, 244, 255)
         self.dark_blue = (39, 60, 117)
@@ -34,6 +53,10 @@ class InvoicePDF(FPDF):
         if self.page_no() == 1:
             return
         
+        if self.logo_path:
+            logo_w = 20  # mm
+            x_pos = self.w - self.r_margin - logo_w
+            self.image(self.logo_path, x=x_pos, y=8, w=logo_w)
         # Add continuation header for subsequent pages
         self.set_font('Arial', 'B', 10)
         self.set_text_color(*self.dark_blue)
@@ -76,10 +99,9 @@ def create_invoice(invoice_data):
     pdf.set_fill_color(*pdf.light_blue)
     pdf.rect(10, 10, 190, 50, 'F')
 
-    # Fixed logo
-    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'MHD.jpg')
-    if os.path.exists(logo_path):
-        pdf.image(logo_path, x=15, y=15, w=35)
+    if pdf.logo_path:
+        pdf.image(pdf.logo_path, x=0, y=22, w=90)
+
 
     # Company name & tagline - Adjusted positioning with margin from right edge
     pdf.set_xy(55, 15)
