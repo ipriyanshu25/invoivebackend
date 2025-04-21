@@ -1,33 +1,31 @@
-from flask import Flask, request, send_file, jsonify
-import io, os, datetime, uuid, random, string
+from flask import Flask, request, send_file, jsonify, Blueprint
+import io, os, datetime, uuid, random, string, requests
 from fpdf import FPDF
 from PIL import Image
 from pymongo import MongoClient
 from db import db
-import requests
 
 app = Flask(__name__)
-
+salary_bp = Blueprint("salaryslip", __name__, url_prefix="/salary")
 invoices_collection = db['invoiceEnoylity']
 
 # Fixed company details
 COMPANY_DETAILS = {
-    'company_name': 'Enoylity',
-    'company_tagline': 'Enoylity Tech PVT.LTD',
-    'company_address': 'address',
-    'company_email': 'Enoylity@gmail.com',
-    'company_phone': '1234567890',
-    'website': 'www.mhdtech.com'  
+    'company_name': 'Enoylity Studio',
+    'company_tagline': 'Enoylity Media Creations Private Limited',
+    'company_address': 'Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square\nNari Road, Nagpur, Maharashtra, India 440026',
+    'company_email': 'support@enoylity.com',
+    'company_phone': '+919284290181',
+    'website': 'https://www.enoylitystudio.com/'
 }
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 LOGO_URL = 'https://www.enoylitystudio.com/wp-content/uploads/2024/02/enoylity-final-logo.png'
 LOGO_FILENAME = 'enoylity-final-logo.png'
 LOGO_PATH = os.path.join(ASSETS_DIR, LOGO_FILENAME)
 
-# Ensure assets dir exists
+# ensure assets dir
 os.makedirs(ASSETS_DIR, exist_ok=True)
-
-# Download logo if we don’t have it yet
+# download logo if missing
 if not os.path.isfile(LOGO_PATH):
     try:
         resp = requests.get(LOGO_URL, timeout=5)
@@ -40,92 +38,67 @@ if not os.path.isfile(LOGO_PATH):
 class InvoicePDF(FPDF):
     def __init__(self):
         super().__init__()
-        # Store invoice data for use in header/footer
         self.invoice_data = None
         self.logo_path = LOGO_PATH if os.path.isfile(LOGO_PATH) else None
-        # Colors
-        self.light_blue = (235, 244, 255)
-        self.dark_blue = (39, 60, 117)
-        self.medium_blue = (100, 149, 237)
-    
+        self.light_blue = (235,244,255)
+        self.dark_blue = (39,60,117)
+        self.medium_blue = (100,149,237)
+
     def header(self):
-        # Skip header on first page (we'll draw it manually)
-        if self.page_no() == 1:
-            return
-        
-        if self.logo_path:
-            logo_w = 20  # mm
-            x_pos = self.w - self.r_margin - logo_w
-            self.image(self.logo_path, x=x_pos, y=8, w=logo_w)
-        # Add continuation header for subsequent pages
-        self.set_font('Arial', 'B', 10)
-        self.set_text_color(*self.dark_blue)
-        self.cell(0, 10, f"Invoice #{self.invoice_data['invoice_number']} (Continued)", 0, 1, 'R')
-        
-        # Add items table header
-        self.set_fill_color(*self.light_blue)
-        self.rect(10, 20, 190, 10, 'F')
-        self.set_xy(15, 22)
-        self.set_font('Arial', 'B', 10)
-        self.cell(90, 6, 'ITEM DESCRIPTION', 0, 0, 'L')
-        self.cell(25, 6, 'QTY', 0, 0, 'C')
-        self.cell(30, 6, 'PRICE', 0, 0, 'R')
-        self.cell(30, 6, 'TOTAL', 0, 1, 'R')
-        
-        # Set the y position for items to start after the header
-        self.set_y(32)
+        if self.page_no() > 1:
+            if self.logo_path:
+                logo_w = 20
+                x = self.w - self.r_margin - logo_w
+                self.image(self.logo_path, x=x, y=8, w=logo_w)
+            self.set_font('Arial','B',10)
+            self.set_text_color(*self.dark_blue)
+            self.cell(0,10,f"Invoice #{self.invoice_data['invoice_number']} (Continued)",0,1,'R')
 
     def footer(self):
         self.set_y(-20)
-        self.set_font('Arial', 'I', 8)
-        self.set_text_color(100, 100, 100)
-        
-        # Company contact info
+        self.set_font('Arial','I',8)
+        self.set_text_color(100,100,100)
         if self.invoice_data:
-            contact_info = f"{COMPANY_DETAILS['company_email']} | {COMPANY_DETAILS['company_phone']} | {COMPANY_DETAILS['website']}"
-            self.cell(0, 6, contact_info, 0, 1, 'C')
-        
-        # Page number
-        self.cell(0, 6, f'Page {self.page_no()}', 0, 0, 'C')
+            contact = f"{COMPANY_DETAILS['company_email']} | {COMPANY_DETAILS['company_phone']} | {COMPANY_DETAILS['website']}"
+            self.cell(0,6,contact,0,1,'C')
+        self.cell(0,6,f'Page {self.page_no()}',0,0,'C')
 
 def create_invoice(invoice_data):
-    """Generate a PDF invoice that handles multiple pages for long item lists."""
     pdf = InvoicePDF()
-    pdf.invoice_data = invoice_data  # Store for use in header/footer
+    pdf.invoice_data = invoice_data
     pdf.add_page()
 
     # --- FIRST PAGE HEADER ---
-    # Draw header background
     pdf.set_fill_color(*pdf.light_blue)
     pdf.rect(10, 10, 190, 50, 'F')
 
     if pdf.logo_path:
         pdf.image(pdf.logo_path, x=0, y=22, w=90)
 
-
-    # Company name & tagline - Adjusted positioning with margin from right edge
+    # Company name & tagline
     pdf.set_xy(55, 15)
     pdf.set_font('Arial', 'B', 20)
     pdf.set_text_color(*pdf.dark_blue)
-    pdf.cell(130, 12, COMPANY_DETAILS['company_name'], align='R')  # Reduced width from 145 to 130
-    
+    pdf.cell(130, 12, COMPANY_DETAILS['company_name'], align='R')
+
     pdf.set_xy(55, 27)
     pdf.set_font('Arial', '', 16)
-    pdf.cell(130, 10, COMPANY_DETAILS['company_tagline'], align='R')  # Reduced width from 145 to 130
+    pdf.cell(130, 10, COMPANY_DETAILS['company_tagline'], align='R')
 
-    # Invoice number and date - Adjusted positioning with margin from right edge
+    # Invoice number, date, and due date
     pdf.set_xy(55, 38)
     pdf.set_font('Arial', '', 10)
-    pdf.cell(130, 8, f"Invoice Number: {invoice_data['invoice_number']}", ln=1, align='R')  # Reduced width from 145 to 130
-
-    pdf.set_xy(55, 44)
-    pdf.cell(130, 6, f"Date: {invoice_data['date']}", ln=1, align='R')  # Reduced width from 145 to 130
+    pdf.set_text_color(*pdf.dark_blue)
+    pdf.cell(130, 8, f"Invoice Number: {invoice_data['invoice_number']}", ln=1, align='R')
+    pdf.set_xy(55, 46)
+    pdf.cell(130, 6, f"Bill Date: {invoice_data['date']}", ln=1, align='R')
+    pdf.set_xy(55, 52)
+    pdf.cell(130, 6, f"Due Date: {invoice_data['due_date']}", ln=1, align='R')
 
     # --- CLIENT AND COMPANY ADDRESS SECTIONS ---
     y_position = 70
-    # Client Information (left)
     pdf.set_fill_color(*pdf.light_blue)
-    pdf.rect(10, y_position, 95, 40, 'F')
+    pdf.rect(10, y_position, 95, 52, 'F')
     pdf.set_xy(15, y_position + 5)
     pdf.set_font('Arial', 'B', 11)
     pdf.set_text_color(*pdf.dark_blue)
@@ -134,14 +107,14 @@ def create_invoice(invoice_data):
     pdf.set_xy(15, y_position + 13)
     pdf.cell(85, 6, invoice_data['client_name'], ln=1)
     pdf.set_xy(15, y_position + 19)
-    pdf.cell(85, 6, invoice_data['client_address'], ln=1)
-    pdf.set_xy(15, y_position + 25)
+    pdf.multi_cell(75, 5, invoice_data['client_address'])
+    pdf.set_xy(15, y_position + 39)
     pdf.cell(85, 6, invoice_data['client_email'], ln=1)
-    pdf.set_xy(15, y_position + 31)
+    pdf.set_xy(15, y_position + 37)
     pdf.cell(85, 6, invoice_data.get('client_phone', ''), ln=1)
 
     # Company Information (right)
-    pdf.rect(115, y_position, 85, 40, 'F')
+    pdf.rect(115, y_position, 85, 52, 'F')
     pdf.set_xy(120, y_position + 5)
     pdf.set_font('Arial', 'B', 11)
     pdf.set_text_color(*pdf.dark_blue)
@@ -150,14 +123,14 @@ def create_invoice(invoice_data):
     pdf.set_xy(120, y_position + 13)
     pdf.cell(75, 6, COMPANY_DETAILS['company_name'], ln=1)
     pdf.set_xy(120, y_position + 19)
-    pdf.cell(75, 6, COMPANY_DETAILS['company_address'], ln=1)
-    pdf.set_xy(120, y_position + 25)
+    pdf.multi_cell(75, 5, COMPANY_DETAILS['company_address'])
+    pdf.set_xy(120, y_position + 39)
     pdf.cell(75, 6, COMPANY_DETAILS['company_email'], ln=1)
-    pdf.set_xy(120, y_position + 31)
+    pdf.set_xy(120, y_position + 45)
     pdf.cell(75, 6, COMPANY_DETAILS['company_phone'], ln=1)
 
     # --- ITEMS TABLE HEADER ---
-    y_position = 120
+    y_position = 130
     pdf.set_fill_color(*pdf.light_blue)
     pdf.rect(10, y_position, 190, 12, 'F')
     pdf.set_xy(15, y_position + 3)
@@ -169,7 +142,7 @@ def create_invoice(invoice_data):
     pdf.cell(30, 6, 'TOTAL', 0, 1, 'R')
 
     # --- ITEMS LIST ---
-    y_position = 135
+    y_position = 145
     pdf.set_draw_color(*pdf.medium_blue)
     
     # Calculate available space for items on first page
@@ -241,36 +214,48 @@ def create_invoice(invoice_data):
     else:
         y_position += 15
     
-    pdf.set_fill_color(*pdf.light_blue)
-    pdf.rect(10, y_position, 95, 35, 'F')
-    pdf.set_xy(15, y_position + 5)
-    pdf.set_font('Arial', 'B', 10)
-    pdf.set_text_color(*pdf.dark_blue)
-    pdf.cell(85, 6, 'BANK DETAILS', ln=1)
-    pdf.set_font('Arial', '', 9)
-    pdf.set_xy(15, y_position + 13)
-    pdf.cell(85, 6, invoice_data['bank_name'], ln=1)
-    pdf.set_xy(15, y_position + 19)
-    pdf.cell(85, 6, invoice_data['bank_account'], ln=1)
+    # pdf.set_fill_color(*pdf.light_blue)
+    # pdf.rect(10, y_position, 95, 35, 'F')
+    # pdf.set_xy(15, y_position + 5)
+    # pdf.set_font('Arial', 'B', 10)
+    # pdf.set_text_color(*pdf.dark_blue)
+    # pdf.cell(85, 6, 'BANK DETAILS', ln=1)
+    # pdf.set_font('Arial', '', 9)
+    # pdf.set_xy(15, y_position + 13)
+    # pdf.cell(85, 6, invoice_data['bank_name'], ln=1)
+    # pdf.set_xy(15, y_position + 19)
+    # pdf.cell(85, 6, invoice_data['bank_account'], ln=1)
 
     # Notes section
-    pdf.set_fill_color(*pdf.light_blue)
-    pdf.rect(115, y_position, 85, 35, 'F')
-    pdf.set_xy(120, y_position + 5)
+        # --- NOTES SECTION (full‑width, centered) ---
+    # Compute full printable width
+    page_width = pdf.w - pdf.l_margin - pdf.r_margin
+    box_height = 35  # or compute dynamically if you like
+
+    # Header: NOTES (bold, centered)
+    pdf.set_xy(pdf.l_margin, y_position + 5)
     pdf.set_font('Arial', 'B', 10)
     pdf.set_text_color(*pdf.dark_blue)
-    pdf.cell(75, 6, 'NOTES', ln=1)
-    pdf.set_xy(120, y_position + 13)
+    pdf.cell(page_width, 6, 'NOTES', ln=1, align='C')
+
+    # Body: invoice_data['notes'] (wrapped, centered)
+    pdf.set_xy(pdf.l_margin, y_position + 13)
     pdf.set_font('Arial', '', 9)
-    pdf.multi_cell(75, 6, invoice_data['notes'])
+    pdf.multi_cell(page_width, 6, invoice_data['notes'], align='C')
+
 
     return pdf.output(dest='S').encode('latin1')
 
 def generate_invoice_number():
-    """Generate a unique invoice number with length 8."""
-    # Generate a 8-character alphanumeric invoice number
-    chars = string.ascii_uppercase + string.digits
-    return 'INV' + ''.join(random.choice(chars) for _ in range(5))
+    # fetch last invoice_number, parse and increment
+    last = invoices_collection.find({"invoice_number": {'$regex': '^INV\d{5}$'}}) 
+    last = last.sort('invoice_number', -1).limit(1)
+    try:
+        prev = next(last)['invoice_number']
+        num = int(prev.replace('INV','')) + 1
+    except StopIteration:
+        num = 90  # start at INV00090
+    return f"INV{num:05d}"
 
 def calculate_totals(items):
     """Calculate subtotal from items."""
@@ -280,61 +265,48 @@ def calculate_totals(items):
 @app.route('/generate-invoice', methods=['POST'])
 def generate_invoice_route():
     try:
-        data = request.get_json()
-
-        # Generate a unique invoice number with length 8
+        data = request.get_json() or {}
+        # required fields
+        required = ['date','client_name','client_address','client_email','items','bank_name','bank_account','notes','payment_method']
+        for f in required:
+            if f not in data:
+                return jsonify({"error": f"Missing required field: {f}"}),400
+        # invoice number
         invoice_number = generate_invoice_number()
         data['invoice_number'] = invoice_number
-        
-        # Calculate subtotal if not provided
-        if 'subtotal' not in data:
-            data['subtotal'] = calculate_totals(data['items'])
-            
-        # Calculate PayPal fee if not provided (e.g., 2.9% + $0.30)
-        # Ensure PayPal fee is provided by the user
-        if 'paypal_fee' not in data:
-            return jsonify({"error": "Missing required field: paypal_fee"}), 400
-
-            
-        # Calculate total if not provided
-        if 'total' not in data:
-            data['total'] = data['subtotal'] + data['paypal_fee']
-
-        # Validate required fields
-        required_fields = [
-            'date', 'client_name', 'client_address', 
-            'client_email', 'items', 'bank_name', 'bank_account', 'notes'
-        ]
-        
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"Missing required field: {field}"}), 400
-
-        # Add company details from constants
+        # parse date and due date
+        inv_date = datetime.datetime.strptime(data['date'], '%d-%m-%Y')
+        due = inv_date + datetime.timedelta(days=7)
+        data['due_date'] = due.strftime('%d-%m-%Y')
+        # calculate subtotal
+        subtotal = sum(i['quantity']*i['price'] for i in data['items'])
+        data['subtotal'] = subtotal
+        # payment method: 1=bank, 0=paypal
+        pm = int(data.get('payment_method'))
+        if pm == 0:
+            fee = round(subtotal * 0.053,2)
+        else:
+            fee = 0.0
+        data['paypal_fee'] = fee
+        data['total'] = subtotal + fee
+        # prepare address multiline
+        data['client_address'] = data['client_address'].replace(', ', '\n')
+        # merge company details
         invoice_data = {**data, **COMPANY_DETAILS}
-        
-        # Create the PDF
+        # generate PDF
         pdf_bytes = create_invoice(invoice_data)
-        
-        # Save invoice data to MongoDB
-        invoice_record = invoice_data.copy()
-        invoice_record['created_at'] = datetime.datetime.now()
-        invoices_collection.insert_one(invoice_record)
-        
-        # Return the PDF
-        pdf_buffer = io.BytesIO(pdf_bytes)
-        pdf_buffer.seek(0)
-
-        return send_file(
-            pdf_buffer,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=f"invoice_{invoice_data['invoice_number']}.pdf"
-        )
+        # save record
+        rec = invoice_data.copy()
+        rec['created_at'] = datetime.datetime.now()
+        invoices_collection.insert_one(rec)
+        # send PDF
+        buf = io.BytesIO(pdf_bytes)
+        buf.seek(0)
+        return send_file(buf, mimetype='application/pdf', as_attachment=True,
+                         download_name=f"invoice_{invoice_number}.pdf")
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}),500
+
 
 @app.route('/get-invoice/<invoice_number>', methods=['GET'])
 def get_invoice(invoice_number):

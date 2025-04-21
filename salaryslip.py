@@ -63,7 +63,7 @@ class ImprovedSalarySlipPDF(FPDF):
         self.ln(3)
         self.set_font('Arial', 'B', 11)
         self.set_text_color(*self.secondary_color)
-        self.cell(180, 5, 'Enoylity Media Creations (OPC) Pvt. Ltd. ', 0, 1, 'L')
+        self.cell(180, 5, 'Enoylity Media Creations Private Limited', 0, 1, 'L')
         self.ln(1)
         self.set_font('Arial', '', 9)
         self.set_text_color(*self.secondary_color)
@@ -163,10 +163,10 @@ class ImprovedSalarySlipPDF(FPDF):
         
         self.set_font('Arial', 'B', 9)
         self.set_text_color(*self.secondary_color)
-        self.cell(left_col_width, 6, 'Work Location:', 0, 0)
+        self.cell(left_col_width, 6, 'Paid Days', 0, 0)
         self.set_font('Arial', '', 9)
         self.set_text_color(0, 0, 0)
-        self.cell(data_col_width, 6, data['company_name'], 0, 0)
+        self.cell(data_col_width, 6, str(employee['working_days']), 0, 0)
         
         self.set_font('Arial', 'B', 9)
         self.set_text_color(*self.secondary_color)
@@ -176,39 +176,13 @@ class ImprovedSalarySlipPDF(FPDF):
         self.cell(data_col_width, 6, str(employee['pan']), 0, 1)
         
         # Add space after employee details
-        self.ln(4)
-        
-        # Attendance table (1/3 width)
-        full_width = self.w - self.left_margin - self.right_margin
-        table_w = full_width / 3
-
-        # Column ratios within that 1/3‑width table
-        col1_w = table_w * 0.4   # label column (40% of the small table)
-        col2_w = table_w * 0.6   # value column (60% of the small table)
-
-        # --- Row 1: Paid Days ---
         self.set_x(self.left_margin)
-        # Label cell
-        self.set_font('Arial', 'B', 10)
-        self.set_fill_color(*self.primary_color)
-        self.set_text_color(255, 255, 255)
-        self.cell(col1_w, 8, 'Paid Days', 1, 0, 'L', True)
-        # Value cell
-        self.set_font('Arial', '', 10)
+        self.set_font('Arial', 'B', 9)
+        self.set_text_color(*self.secondary_color)
+        self.cell(left_col_width, 6, 'LOP Days:', 0, 0)
+        self.set_font('Arial', '', 9)
         self.set_text_color(0, 0, 0)
-        self.cell(col2_w, 8, str(employee['working_days']), 1, 1, 'C')
-
-        # --- Row 2: LOP Days ---
-        self.set_x(self.left_margin)
-        # Label cell
-        self.set_font('Arial', 'B', 10)
-        self.set_fill_color(*self.primary_color)
-        self.set_text_color(255, 255, 255)
-        self.cell(col1_w, 8, 'LOP Days', 1, 0, 'L', True)
-        # Value cell
-        self.set_font('Arial', '', 10)
-        self.set_text_color(0, 0, 0)
-        self.cell(col2_w, 8, str(employee['lop']), 1, 1, 'C')
+        self.cell(data_col_width, 6, str(employee['lop']), 0, 1)
 
         self.ln(5)
         
@@ -722,9 +696,3 @@ def generate_salary_slip():
             "status": "error",
             "message": str(e)
         }), 500
-
-@salary_bp.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok"})
-
-
