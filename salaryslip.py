@@ -7,6 +7,7 @@ import os
 from dateutil.relativedelta import relativedelta
 import io
 from num2words import num2words
+from utils import format_response
 
 # Import standard FPDF without extensions
 from fpdf import FPDF
@@ -606,93 +607,61 @@ class SalarySlipGenerator:
 def upload_logo():
     try:
         if 'logo' not in request.files:
-            return jsonify({
-                "status": "error",
-                "message": "No logo file provided"
-            }), 400
-            
+            return format_response(False, "No logo file provided", status=400)
+
         logo_file = request.files['logo']
         if logo_file.filename == '':
-            return jsonify({
-                "status": "error",
-                "message": "No logo file selected"
-            }), 400
-            
+            return format_response(False, "No logo file selected", status=400)
+
         # Save the logo file
         logo_file.save('company_logo.png')
-        
-        return jsonify({
-            "status": "success",
-            "message": "Logo uploaded successfully"
-        })
-        
+        return format_response(True, "Logo uploaded successfully")
+
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return format_response(False, "Internal server error", status=500)
+
 
 @salary_bp.route('/generate-salary-slip', methods=['POST'])
 def generate_salary_slip():
     try:
-        # Get JSON data from request
-        data = request.get_json()
-        
-        if not data or 'employee_data' not in data:
-            return jsonify({
-                "status": "error",
-                "message": "Missing employee_data in request"
-            }), 400
-        
-        # Validate required fields
-        required_fields = ['full_name', 'doj', 'salary_structure']
-        for field in required_fields:
-            if field not in data['employee_data']:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Missing required field: {field}"
-                }), 400
-        
-        # Validate date formats
-        employee_data = data['employee_data']
-        generator = SalarySlipGenerator({})  # Temporary instance for validation
-        
-        if not generator.validate_date(employee_data['doj']):
-            return jsonify({
-                "status": "error",
-                "message": f"Invalid date format for doj. Use DD-MM-YYYY"
-            }), 400
-        
-        # Validate salary structure
-        if not isinstance(employee_data['salary_structure'], list) or len(employee_data['salary_structure']) == 0:
-            return jsonify({
-                "status": "error",
-                "message": "Salary structure must be a non-empty list"
-            }), 400
-        
-        # Set default LOP if not provided
-        if 'lop' not in employee_data:
-            employee_data['lop'] = 0
-        
-        # Create salary slip generator
+        payload = request.get_json() or {}
+        employee_data = payload.get('employee_data')
+
+        if not employee_data:
+            return format_response(False, "Missing 'employee_data' in request", status=400)
+
+        # Required fields
+        for field in ('full_name', 'doj', 'salary_structure'):
+            if field not in employee_data:
+                return format_response(False, f"Missing required field: {field}", status=400)
+
+        # Salary structure must be a non-empty list
+        if not isinstance(employee_data['salary_structure'], list) or not employee_data['salary_structure']:
+            return format_response(False, "Salary structure must be a non-empty list", status=400)
+
+        # Default LOP to 0 if absent
+        employee_data.setdefault('lop', 0)
+
+        # Instantiate generator (will set up dates & working days)
         generator = SalarySlipGenerator(
             employee_data,
-            current_date=data.get('current_date')
+            current_date=payload.get('current_date')
         )
-        
-        # Generate PDF
+
+        # Validate date format for DOJ
+        if not generator.validate_date(employee_data['doj']):
+            return format_response(False, "Invalid date format for doj. Use DD-MM-YYYY", status=400)
+
+        # Generate PDF buffer
         pdf_buffer = generator.generate_pdf()
-        
-        # Send PDF file
+
+        # Stream PDF to client
         return send_file(
             pdf_buffer,
             mimetype='application/pdf',
             as_attachment=True,
             download_name=f"salary_slip_{employee_data['full_name'].replace(' ', '_')}.pdf"
         )
-    
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+
+    except Exception:
+        return format_response(False, "Internal server error", status=500)

@@ -1,25 +1,22 @@
-from flask import Flask, request, jsonify,Blueprint, send_file
+from flask import Blueprint, request, send_file, abort
 from flask_pymongo import PyMongo
 from bson import ObjectId
 from datetime import datetime
 from db import db
+from utils import format_response
+import re
+import math
+import random
+import string
 from salaryslip import SalarySlipGenerator
+import calendar
+import uuid
+from io import BytesIO
+import os
 
-employee_bp = Blueprint('employee', __name__,url_prefix='/employees')
+employee_bp = Blueprint('employee', __name__, url_prefix='/employee')
 
-# Helper function for formatting consistent responses
-def format_response(success, message, data=None, status_code=200):
-    return jsonify({
-        "success": success,
-        "message": message,
-        "data": data or {}
-    }), status_code
-
-import random
-import string
-
-import random
-import string
+# Helper to generate unique employee IDs
 
 def generate_unique_employee_id():
     while True:
@@ -27,278 +24,214 @@ def generate_unique_employee_id():
         if not db.employees.find_one({"employeeId": emp_id}):
             return emp_id
 
-
-
-@employee_bp.route('/saverecord', methods=['POST'])
+@employee_bp.route('/SaveRecord', methods=['POST'])
 def add_employee():
-    try:
-        data = request.get_json()
+    data = request.get_json(force=True)
+    # Required fields
+    required = ["name", "email", "phone", "dob", "adharnumber", "pan_number", "date_of_joining",  "base_salary", "department", "designation"]
+    if not all(data.get(f) for f in required):
+        return format_response(False, "Missing required employee details", status=400)
 
-        name = data.get("name")
-        email = data.get("email")
-        phone = data.get("phone")
-        dob = data.get("dob")
-        adharnumber = data.get("adharnumber")
-        pan_number = data.get("pan_number")
-        date_of_joining = data.get("date_of_joining")
-        monthly_salary = data.get("monthly_salary")
-        department = data.get("department")
-        designation = data.get("designation")
-        bank_details = data.get("bank_details")
-        address = data.get("address")
+    # Check uniqueness
+    if db.employees.find_one({"$or": [{"email": data['email']}, {"phone": data['phone']}] }):
+        return format_response(False, "Employee already exists with this email or phone number", status=409)
 
-        if not all([
-            name, email, phone, dob, adharnumber, pan_number,
-            date_of_joining, monthly_salary, department, designation
-        ]):
-            return format_response(False, "Missing required employee details", status_code=400)
-
-        # Uniqueness check
-        existing_employee = db.employees.find_one({
-            "$or": [
-                {"email": email},
-                {"phone": phone}
-            ]
-        })
-        if existing_employee:
-            return format_response(False, "Employee already exists with this email or phone number", status_code=409)
-
-        # Date format validation
+    # Validate dates
+    for field in ("dob", "date_of_joining"):  
         try:
-            datetime.strptime(dob, "%Y-%m-%d")
-            datetime.strptime(date_of_joining, "%Y-%m-%d")
+            datetime.strptime(data[field], "%Y-%m-%d")
         except ValueError:
-            return format_response(False, "Date format must be YYYY-MM-DD", status_code=400)
+            return format_response(False, f"{field} must be YYYY-MM-DD", status=400)
 
-        try:
-            monthly_salary = float(monthly_salary)
-        except ValueError:
-            return format_response(False, "Monthly salary must be a number", status_code=400)
-
-        annual_salary = round(monthly_salary * 12, 2)
-        ctc = annual_salary
-
-        # Remove 'cities' if present in address
-        if address and "cities" in address:
-            address.pop("cities")
-
-        # Generate unique employee ID
-        employee_id = generate_unique_employee_id()
-
-        employee_record = {
-            "employeeId": employee_id,
-            "name": name,
-            "email": email,
-            "phone": phone,
-            "dob": dob,
-            "adharnumber": adharnumber,
-            "pan_number": pan_number,
-            "date_of_joining": date_of_joining,
-            "monthly_salary": monthly_salary,
-            "annual_salary": annual_salary,
-            "ctc": ctc,
-            "department": department,
-            "designation": designation,
-            "bank_details": bank_details,
-            "address": address,
-            "created_at": datetime.utcnow()
-        }
-
-        db.employees.insert_one(employee_record)
-
-        return format_response(True, "Employee added successfully", {
-            "employee_id": employee_id
-        }, 201)
-
-    except Exception as e:
-        return format_response(False, str(e), status_code=500)
-
-
-@employee_bp.route('/getemp', methods=['POST'])
-def get_employee():
+    # Parse numeric
     try:
-        data = request.get_json()
-        employee_id = data.get("employee_id")
-        if not employee_id:
-            return format_response(False, "Employee ID is required", status_code=400)
+        data['annual_salary'] = float(data['base_salary']) * 12
+        data['base_salary'] = float(data['base_salary'])
+    except (ValueError, TypeError):
+        return format_response(False, "Salary fields must be numbers", status=400)
 
-        # Query using employeeId instead of ObjectId
-        employee = db.employees.find_one({"employeeId": employee_id})
-        if not employee:
-            return format_response(False, "Employee not found", status_code=404)
-
-        employee_data = {
-            "employeeId": employee.get("employeeId"),
-            "name": employee.get("name"),
-            "email": employee.get("email"),
-            "phone": employee.get("phone"),
-            "dob": employee.get("dob"),
-            "adharnumber": employee.get("adharnumber"),
-            "pan_number": employee.get("pan_number"),
-            "department":employee.get("department"),
-            "designation":employee.get("designation"),
-            "date_of_joining": employee.get("date_of_joining"),
-            "annual_salary": employee.get("annual_salary"),
-            "monthly_salary": employee.get("monthly_salary"),
-            "ctc": employee.get("ctc"),
-            "bank_details": employee.get("bank_details"),
-            "address": employee.get("address"),
-        }
-
-        return format_response(True, "Employee retrieved successfully.", {"employee": employee_data}, 200)
-
-    except Exception as e:
-        return format_response(False, str(e), status_code=500)
-
-
+    # Generate ID and assemble record
+    employee_id = generate_unique_employee_id()
+    record = {
+        "employeeId": employee_id,
+        "name": data['name'],
+        "email": data['email'],
+        "phone": data['phone'],
+        "dob": data['dob'],
+        "adharnumber": data['adharnumber'],
+        "pan_number": data['pan_number'],
+        "date_of_joining": data['date_of_joining'],
+        "annual_salary": data['annual_salary'],
+        "base_salary":data['base_salary'],
+        "bank_details": data.get('bank_details', {}),
+        "address": data.get('address', {}),
+        "department": data['department'],
+        "designation": data['designation'],
+        "created_at": datetime.utcnow()
+    }
+    _ = db.employees.insert_one(record)
+    return format_response(True, "Employee added successfully", {"employeeId": employee_id}, status=201)
 
 @employee_bp.route('/update', methods=['POST'])
 def update_employee():
-    try:
-        data = request.get_json()
-        employee_id = data.get("employee_id")
-        if not employee_id:
-            return format_response(False, "Employee ID is required", status_code=400)
+    data = request.get_json(force=True)
+    emp_id = data.pop('employeeId', None)
+    if not emp_id:
+        return format_response(False, "employeeId is required", status=400)
+    if not data:
+        return format_response(False, "No fields provided for update", status=400)
 
-        update_fields = {}
+    # Validate any provided dates
+    for fld in ("dob", "date_of_joining"):
+        if fld in data:
+            try:
+                datetime.strptime(data[fld], "%Y-%m-%d")
+            except ValueError:
+                return format_response(False, f"{fld} must be YYYY-MM-DD", status=400)
+    # Numeric fields
+    for num in ("annual_salary", "base_salary"):  
+        if num in data:
+            try:
+                data[num] = float(data[num])
+            except (ValueError, TypeError):
+                return format_response(False, f"{num} must be a number", status=400)
 
-        if "dob" in data:
-            data["dob"] = datetime.strptime(data["dob"], "%Y-%m-%d")
-        if "date_of_joining" in data:
-            data["date_of_joining"] = datetime.strptime(data["date_of_joining"], "%Y-%m-%d")
-        if "annual_salary" in data:
-            data["annual_salary"] = float(data["annual_salary"])
-            data["monthly_salary"] = round(data["annual_salary"] / 12, 2)
-            data["ctc"] = data["annual_salary"]
+    result = db.employees.update_one({"employeeId": emp_id}, {"$set": data})
+    if not result.matched_count:
+        abort(404)
+    return format_response(True, "Employee updated successfully", {"employeeId": emp_id}, status=200)
 
-        # Build update fields excluding employee_id
-        for key in data:
-            if key != "employee_id":
-                update_fields[key] = data[key]
+@employee_bp.route('/delete', methods=['POST'])
+def delete_employee():
+    emp_id = request.get_json(force=True).get('employeeId')
+    if not emp_id:
+        return format_response(False, "employeeId is required", status=400)
+    res = db.employees.delete_one({"employeeId": emp_id})
+    if not res.deleted_count:
+        abort(404)
+    return format_response(True, "Employee deleted successfully", status=200)
 
-        result = db.employees.update_one({"_id": ObjectId(employee_id)}, {"$set": update_fields})
-        if result.matched_count == 0:
-            return format_response(False, "Employee not found", status_code=404)
-
-        return format_response(True, "Employee updated successfully.", {"employeeId": employee_id}, 200)
-
-    except Exception as e:
-        return format_response(False, str(e), status_code=500)
-
-from datetime import datetime
-
-@employee_bp.route('/getall', methods=['POST'])
-def get_all_employees():
-    try:
-        employees_cursor = db.employees.find()
-        employees_list = []
-
-        def format_date(value):
-            if isinstance(value, datetime):
-                return value.strftime("%Y-%m-%d")
-            return value
-
-        for emp in employees_cursor:
-            employees_list.append({
-                "employeeId": emp.get("employeeId"),
-                "name": emp.get("name"),
-                "email": emp.get("email"),
-                "phone": emp.get("phone"),
-                "dob": format_date(emp.get("dob")),
-                "department": emp.get("department"),
-                "designation": emp.get("designation"),
-                "adharnumber": emp.get("adharnumber"),
-                "pan_number": emp.get("pan_number"),
-                "date_of_joining": format_date(emp.get("date_of_joining")),
-                "monthly_salary": emp.get("monthly_salary"),
-                "annual_salary": emp.get("annual_salary"),
-                "ctc": emp.get("ctc"),
-                "bank_details": emp.get("bank_details"),
-                "address": emp.get("address"),
-                "created_at": format_date(emp.get("created_at"))
-            })
-
-        return format_response(True, "Employees retrieved successfully.", {"employees": employees_list}, 200)
-
-    except Exception as e:
-        return format_response(False, str(e), status_code=500)
-
-    
-# from flask import Blueprint, request, jsonify, send_file
-# from datetime import datetime
-# from your_salaryslip_module import SalarySlipGenerator  # adjust import path
-# # make sure you have `db` and any other imports (e.g. num2words) available
-
-
-@employee_bp.route('/get_salary_slip', methods=['POST'])
-def get_salary_slip():
-    data = request.get_json() or {}
-    employee_id  = data.get("employee_id")
-    lop_days      = float(data.get("lop", 0))
-    date_str      = data.get("date")   # e.g. "31-08-2024"
-    payslip_month = data.get("month")  # e.g. "August"
-
-    # 1. Basic validation
-    if not all([employee_id, date_str, payslip_month]):
-        return jsonify({"success": False, "message": "Missing required fields: employee_id, date, or month"}), 400
-
-    try:
-        # parse and confirm date format
-        current_date = datetime.strptime(date_str, "%d-%m-%Y")
-    except ValueError:
-        return jsonify({"success": False, "message": "Invalid date format. Use DD-MM-YYYY"}), 400
-
-    # 2. Load employee
-    emp = db.employees.find_one({"employeeId": employee_id})
+@employee_bp.route('/getrecord', methods=['GET'])
+def get_record():
+    emp_id = request.args.get('employeeId')
+    if not emp_id:
+        return format_response(False, "Query parameter 'employeeId' is required", status=400)
+    emp = db.employees.find_one({"employeeId": emp_id})
     if not emp:
-        return jsonify({"success": False, "message": "Employee not found"}), 404
+        abort(404)
+    # Serialize
+    emp['created_at'] = emp['created_at'].isoformat() if emp.get('created_at') else None
+    emp.pop('_id', None)
+    return format_response(True, "Employee retrieved successfully", {"employee": emp}, status=200)
 
-    # 3. Build the salary structure, forcing Basic Pay from the DB
-    incoming = data.get("salary_structure", [])
-    # map any incoming allowances by name
-    incoming_map = { item["name"]: float(item.get("amount", 0)) for item in incoming }
+@employee_bp.route('/getlist', methods=['POST'])
+def get_all_employees():
+    params = request.get_json(force=True) or {}
+    search = (params.get('search') or '').strip()
+    page = max(int(params.get('page', 1)), 1)
+    size = max(int(params.get('pageSize', 10)), 1)
+    query = {}
+    if search:
+        regex = re.compile(re.escape(search), re.IGNORECASE)
+        query['$or'] = [{'name': regex}, {'email': regex}, {'phone': regex}]
+    total = db.employees.count_documents(query)
+    skip = (page - 1) * size
+    cursor = db.employees.find(query).skip(skip).limit(size)
+    results = []
+    for e in cursor:
+        e.pop('_id', None)
+        results.append(e)
+    total_pages = math.ceil(total / size)
+    return format_response(True, "Employees retrieved successfully", {
+        "employees": results,
+        "total": total,
+        "page": page,
+        "pageSize": size,
+        "totalPages": total_pages
+    }, status=200)
 
+@employee_bp.route('/salaryslip', methods=['POST'])
+def get_salary_slip():
+    data = request.get_json(force=True)
+    emp_id = data.get('employee_id')
+    payslip_month = data.get('month')
+    if not emp_id or not payslip_month:
+        return format_response(False, "Missing required fields: employee_id or month", status=400)
+    try:
+        month_date = datetime.strptime(payslip_month, "%m-%Y")
+    except ValueError:
+        return format_response(False, "Invalid month format. Use MM-YYYY", status=400)
+    emp = db.employees.find_one({"employeeId": emp_id})
+    if not emp:
+        abort(404)
+    year, month = month_date.year, month_date.month
+    max_days = calendar.monthrange(year, month)[1]
+    date_str = f"{max_days:02d}-{month:02d}-{year}"
+    # Build salary structure
+    incoming_map = {item['name']: float(item.get('amount', 0)) for item in data.get('salary_structure', [])}
     allowance_names = [
-        "Basic Pay",
-        "House Rent Allowance",
-        "Conveyance Allowance",
-        "Performance Bonas",
-        "Overtime Bonas",
-        "MED ALL",
-        "OTH ALL"
+        "Basic Pay", "House Rent Allowance", "Conveyance Allowance",
+        "Performance Bonas", "Overtime Bonas", "Special Allowance"
     ]
-
-    final_structure = []
+    final = []
     for name in allowance_names:
-        if name == "Basic Pay":
-            amt = float(emp.get("monthly_salary", 0))
-        else:
-            amt = incoming_map.get(name, 0.0)
-        final_structure.append({ "name": name, "amount": amt })
-
-    # 4. Assemble emp_data for the generator
-    emp_data = {
-        "full_name":       emp.get("name"),
-        "emp_no":          emp.get("employeeId"),
-        "designation":     emp.get("designation", ""),
-        "department":      emp.get("department", ""),
-        "doj":             datetime.strptime(emp.get("date_of_joining"), "%Y-%m-%d").strftime("%d-%m-%Y"),
-        "bank_account":    emp.get("bank_details", {}).get("account_number", ""),
-        "pan":             emp.get("pan_number"),
-        "lop":             lop_days,
-        "salary_structure": final_structure,
+        amt = float(emp.get('monthly_salary', 0)) if name == "Basic Pay" else incoming_map.get(name, 0.0)
+        final.append({"name": name, "amount": amt})
+    emp_snapshot = {
+        "full_name": emp['name'],
+        "emp_no": emp['employeeId'],
+        "designation": emp.get('designation', ''),
+        "department": emp.get('department', ''),
+        "doj": datetime.strptime(emp['date_of_joining'], "%Y-%m-%d").strftime("%d-%m-%Y"),
+        "bank_account": emp.get('bank_details', {}).get('account_number', ''),
+        "pan": emp.get('pan_number'),
+        "lop": float(data.get('lop', 0)),
+        "salary_structure": final
     }
+    # Generate PDF
+    pdf_buf = SalarySlipGenerator(emp_snapshot, current_date=date_str).generate_pdf()
+    payslip_id = str(uuid.uuid4())
+    db.payslips.insert_one({
+        "payslipId": payslip_id,
+        "employeeId": emp_id,
+        "month": month,
+        "year": year,
+        "generated_on": datetime.utcnow(),
+        "lop_days": emp_snapshot['lop'],
+        "salary_structure": final,
+        "emp_snapshot": emp_snapshot,
+        "filename": f"salary_slip_{emp_id}.pdf"
+    })
+    return send_file(pdf_buf, mimetype='application/pdf', as_attachment=True, download_name=f"salary_slip_{emp_id}.pdf")
 
-    # 5. Kick off PDF generation
-    # pass the original date_str so your generator's relativedelta logic works
-    generator = SalarySlipGenerator(emp_data, current_date=date_str)
-    pdf_buf   = generator.generate_pdf()
+@employee_bp.route('/getpayslips', methods=['POST'])
+def get_payslips():
+    params = request.get_json(force=True) or {}
+    query = {}
+    if params.get('search'):
+        query['$text'] = {'$search': params['search']}
+    if params.get('month'):
+        query['month'] = int(params['month'])
+    if params.get('year'):
+        query['year'] = int(params['year'])
+    page = max(int(params.get('page', 1)), 1)
+    size = max(int(params.get('pageSize', 10)), 1)
+    total = db.payslips.count_documents(query)
+    cursor = db.payslips.find(query, {'_id': 0}).skip((page-1)*size).limit(size)
+    payslips = [{**p, 'download_link': f"/download/{p['payslipId']}"} for p in cursor]
+    if not payslips:
+        abort(404)
+    return format_response(True, "Payslips retrieved successfully", {
+        'payslips': payslips,
+        'pagination': { 'totalRecords': total, 'currentPage': page, 'totalPages': math.ceil(total/size) }
+    }, status=200)
 
-    # 6. Return as downloadable PDF
-    return send_file(
-        pdf_buf,
-        mimetype='application/pdf',
-        as_attachment=True,
-        download_name=f"salary_slip_{employee_id}.pdf"
-    )
-
+@employee_bp.route('/viewpdf/<payslip_id>', methods=['GET'])
+def view_payslip_pdf(payslip_id):
+    payslip = db.payslips.find_one({"payslipId": payslip_id})
+    if not payslip:
+        abort(404)
+    file_path = os.path.join('path/to/salary/slips', payslip['filename'])
+    if not os.path.exists(file_path):
+        return format_response(False, "Payslip PDF file not found", status=404)
+    return send_file(file_path, mimetype='application/pdf', as_attachment=True, download_name=payslip['filename'])
