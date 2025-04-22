@@ -175,7 +175,7 @@ def get_salary_slip():
     ]
     final = []
     for name in allowance_names:
-        amt = float(emp.get('monthly_salary', 0)) if name == "Basic Pay" else incoming_map.get(name, 0.0)
+        amt = float(emp.get('base_salary', 0)) if name == "Basic Pay" else incoming_map.get(name, 0.0)
         final.append({"name": name, "amount": amt})
     emp_snapshot = {
         "full_name": emp['name'],

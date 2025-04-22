@@ -132,9 +132,9 @@ def generate_invoice_endpoint():
             amt  = rate * qty
             subtotal += amt
             pdf.cell(90, 8, desc, 0, 0, 'L')
-            pdf.cell(30, 8, f'${rate:.2f}', 0, 0, 'R')
+            pdf.cell(30, 8, f'${rate:.2f}', 0, 0, 'C')
             pdf.cell(20, 8, str(qty),       0, 0, 'C')
-            pdf.cell(45, 8, f'${amt:.2f}',  0, 1, 'R')
+            pdf.cell(45, 8, f'${amt:.2f}',  0, 1, 'C')
 
         # PayPal fee
         if payment_method == 0:

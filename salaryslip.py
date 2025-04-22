@@ -346,11 +346,6 @@ class ImprovedSalarySlipPDF(FPDF):
         amount_in_words = f"({amount_words.title()} Only)"
         self.cell(0, 7, amount_in_words, 0, 1)
         
-        # Note
-        self.set_font('Arial', '', 8)
-        self.set_text_color(100, 100, 100)  # Grey
-        self.cell(0, 7, '**Total Net Payable = Gross Earnings - Total Deductions', 0, 1)
-        
         # Add tax notes if applicable
         if data.get('tax_notes'):
             self.ln(3)
@@ -464,14 +459,6 @@ class SalarySlipGenerator:
         self.tax_details['rebate_applied'] = annual_income <= 1275000
         self.tax_details['marginal_relief_applicable'] = 1275000 < annual_income <= 1500000
         
-        # Return tax notes
-        tax_notes = []
-        if self.tax_details['rebate_applied']:
-            tax_notes.append("*You qualify for rebate under Section 87A. No tax applicable.")
-        elif self.tax_details['marginal_relief_applicable']:
-            tax_notes.append("*Marginal relief applied to your tax calculation.")
-        
-        return tax_notes
     
     def calculate_salary(self):
         """Calculate salary based on working days and deductions"""
