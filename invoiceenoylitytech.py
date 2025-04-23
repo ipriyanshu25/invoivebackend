@@ -13,8 +13,8 @@ enoylity_bp = Blueprint("enoylity", __name__, url_prefix="/enoylity")
 
 # COLORS
 BLACK      = (0, 0, 0)
-LIGHT_BLUE = (235, 244, 250)
-DARK_BLUE  = (39, 60, 117)
+LIGHT_PINK = (255, 228, 241)
+DARK_PINK  = (199, 21, 133)
 
 # Company info
 COMPANY_INFO = {
@@ -92,29 +92,66 @@ def generate_invoice_endpoint():
         pdf.due_date       = due_date
         pdf.add_page()
         
-        # Bill To section
-        pdf.set_fill_color(*LIGHT_BLUE)
-        pdf.set_text_color(*BLACK)
-        pdf.set_font('Lexend', 'B', 12)
-        pdf.cell(0, 8, 'Bill To:', ln=1, fill=True)
-        pdf.set_font('Lexend', '', 11)
-        for line in (bt_name, bt_addr, bt_city, bt_mail):
-            pdf.cell(0, 6, line, ln=1, fill=True)
-        pdf.ln(10)
+      # Bill To section
+        lines    = [bt_name, bt_addr, bt_city, bt_mail]
+        x, y     = pdf.l_margin, pdf.get_y()
+        width    = pdf.w - pdf.l_margin - pdf.r_margin
+        header_h = 13
+        line_h   = 7
+        indent   = 4
+        padding  = 6
 
-        # Invoice Details
-        pdf.set_fill_color(*LIGHT_BLUE)
+        block_h = header_h + len(lines) * line_h + padding
+
+        # Draw one seamless pink block
+        pdf.set_fill_color(*LIGHT_PINK)
+        pdf.rect(x, y, width, block_h, style='F')
+
+        # Header
+        pdf.set_xy(x + indent, y + indent)
         pdf.set_text_color(*BLACK)
         pdf.set_font('Lexend', 'B', 12)
-        pdf.cell(0, 8, 'Invoice Details:', ln=1, fill=True)
+        pdf.cell(0, header_h, 'Bill To:', border=0, ln=1)
+
+        # Lines, each indented under the header
+        pdf.set_font('Lexend', '', 11)
+        for line in lines:
+            pdf.set_x(x + indent)
+            pdf.cell(0, line_h, line, border=0, ln=1)
+
+        pdf.ln(padding)
+
+
+        # Invoice Details section
+        details = [
+            f"Invoice #: {inv_num}",
+            f"Bill Date: {invoice_date}",
+            f"Due Date:  {due_date}"
+        ]
+        y2      = pdf.get_y()
+        block_h2 = header_h + len(details) * line_h + padding
+
+        pdf.set_fill_color(*LIGHT_PINK)
+        pdf.rect(x, y2, width, block_h2, style='F')
+
+        # Header
+        pdf.set_xy(x + indent, y2 + indent)
+        pdf.set_font('Lexend', 'B', 12)
+        pdf.cell(0, header_h, 'Invoice Details:', border=0, ln=1)
+
+        # Detail lines, same indent and slightly tighter spacing
         pdf.set_font('Lexend', '', 10)
-        pdf.cell(0, 7, f"Invoice #: {inv_num}", ln=1, fill=True)
-        pdf.cell(0, 7, f"Bill Date: {invoice_date}", ln=1, fill=True)
-        pdf.cell(0, 7, f"Due Date:  {due_date}", ln=1, fill=True)
-        pdf.ln(10)
+        for d in details:
+            pdf.set_x(x + indent)
+            pdf.cell(0, line_h, d, border=0, ln=1)
+
+        pdf.ln(padding)
+
+
+
 
         # Table header
-        pdf.set_fill_color(*DARK_BLUE)
+        pdf.set_fill_color(*DARK_PINK)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font('Lexend', 'B', 12)
         pdf.cell(90, 10, 'DESCRIPTION', 0, 0, 'C', fill=True)
