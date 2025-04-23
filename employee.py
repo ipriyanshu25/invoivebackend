@@ -170,13 +170,25 @@ def get_salary_slip():
     # Build salary structure
     incoming_map = {item['name']: float(item.get('amount', 0)) for item in data.get('salary_structure', [])}
     allowance_names = [
-        "Basic Pay", "House Rent Allowance", "Conveyance Allowance",
+        "Basic Pay", "House Rent Allowance",
         "Performance Bonas", "Overtime Bonas", "Special Allowance"
     ]
     final = []
+
+    # calculate basic amount once
+    basic_amt = float(emp.get('base_salary', 0)) / 2
+
     for name in allowance_names:
-        amt = float(emp.get('base_salary', 0)) if name == "Basic Pay" else incoming_map.get(name, 0.0)
+        if name == "Basic Pay":
+            amt = basic_amt
+        elif name == "House Rent Allowance":
+            amt = basic_amt * 0.60   # 60% of basic pay
+        elif name == "Special Allowance":
+            amt = basic_amt * 0.40   # 60% of basic pay
+        else:
+            amt = incoming_map.get(name, 0.0)
         final.append({"name": name, "amount": amt})
+
     emp_snapshot = {
         "full_name": emp['name'],
         "emp_no": emp['employeeId'],
@@ -185,6 +197,7 @@ def get_salary_slip():
         "doj": datetime.strptime(emp['date_of_joining'], "%Y-%m-%d").strftime("%d-%m-%Y"),
         "bank_account": emp.get('bank_details', {}).get('account_number', ''),
         "pan": emp.get('pan_number'),
+        "monthly_salary":emp.get('annual_salary')/12,
         "lop": float(data.get('lop', 0)),
         "salary_structure": final
     }

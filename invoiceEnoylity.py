@@ -10,18 +10,18 @@ from utils import format_response
 from db import db
 
 # Blueprint for Enoylity Studio invoices
-invoice_enoylity_bp = Blueprint("invoiceEnoylity", __name__, url_prefix="/invoiceEnoylity")
+invoice_enoylity_bp = Blueprint("invoiceEnoylity", __name__, url_prefix="/invoiceEnoy")
 
 # Fixed company details
 COMPANY_DETAILS = {
-    'company_name': 'Enoylity Studio',
-    'company_tagline': 'Enoylity Media Creations Private Limited',
-    'company_address': (
+    'name': 'Enoylity Studio',
+    'tagline': 'Enoylity Media Creations Private Limited',
+    'address': (
         'Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square\n'
         'Nari Road, Nagpur, Maharashtra, India 440026'
     ),
-    'company_email': 'support@enoylity.com',
-    'company_phone': '+919284290181',
+    'email': 'support@enoylity.com',
+    'phone': '+919284290181',
     'website': 'https://www.enoylitystudio.com/',
     'bank_details': (
         'Account name: Enoylity Media Creations LLC\n'

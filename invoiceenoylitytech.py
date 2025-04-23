@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, jsonify, Blueprint
+from flask import Flask, request, send_file, Blueprint
 from fpdf import FPDF
 import os
 import io
@@ -7,9 +7,11 @@ import string
 from datetime import datetime
 from pymongo import ReturnDocument
 from db import db  # ensure db.py provides a MongoDB client with the necessary collections
+from utils import format_response  # centralized formatter
+import math
 
 # Blueprint setup
-enoylity_bp = Blueprint("enoylity", __name__, url_prefix="/enoylity")
+enoylity_bp = Blueprint("enoylity", __name__, url_prefix="/invoice")
 
 # COLORS
 BLACK      = (0, 0, 0)
@@ -26,7 +28,6 @@ COMPANY_INFO = {
     "email":      "support@enoylity.com"
 }
 
-# Helper to get next invoice number from MongoDB
 def get_next_invoice_number():
     counter = db.invoice_counters.find_one_and_update(
         {"_id": "Enoylity Tech counter"},
@@ -43,7 +44,6 @@ class InvoicePDF(FPDF):
         # Register Lexend fonts (ensure .ttf files are in 'static/fonts/' directory)
         self.add_font('Lexend', '', os.path.join('static', 'Lexend-Regular.ttf'), uni=True)
         self.add_font('Lexend', 'B', os.path.join('static', 'Lexend-Bold.ttf'), uni=True)
-        # Set default font
         self.set_font('Lexend', '', 11)
 
     def header(self):
@@ -76,16 +76,13 @@ def generate_invoice_endpoint():
         bt_addr        = data['bill_to_address']
         bt_city        = data['bill_to_city']
         bt_mail        = data['bill_to_email']
-        note           =data['note']
+        note           = data['note']
         items          = data.get('items', [])
-        invoice_date   = data['invoice_date']      # format: "DD-MM-YYYY"
-        due_date       = data['due_date']          # format: "DD-MM-YYYY"
-        payment_method = data.get('payment_method', 0)  # 0 = PayPal, 1 = Bank
+        invoice_date   = data['invoice_date']
+        due_date       = data['due_date']
+        payment_method = data.get('payment_method', 0)
 
-        # Get next invoice number from database
         inv_num = get_next_invoice_number()
-
-        # Build PDF
         pdf = InvoicePDF()
         pdf.invoice_number = inv_num
         pdf.invoice_date   = invoice_date
@@ -196,8 +193,6 @@ def generate_invoice_endpoint():
 
         # Generate 16-digit unique invoice enoylity ID
         invoice_enoylity_id = ''.join(random.choices(string.digits, k=16))
-
-        # Persist record in database
         record = {
             'invoiceenoylityId': invoice_enoylity_id,
             'invoice_number':     inv_num,
@@ -217,7 +212,6 @@ def generate_invoice_endpoint():
         }
         db.invoiceenoylity.insert_one(record)
 
-        # Output PDF
         buffer = io.BytesIO()
         buffer.write(pdf.output(dest='S').encode('latin1'))
         buffer.seek(0)
@@ -229,14 +223,57 @@ def generate_invoice_endpoint():
         )
 
     except KeyError as ke:
-        return jsonify({"error": f"Missing field: {ke}"}), 400
+        return format_response(False, f"Missing field: {ke}", None, 400)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return format_response(False, str(e), None, 500)
 
 @enoylity_bp.route('/invoices', methods=['GET'])
 def get_all_invoices():
     try:
         invoices = list(db.invoiceenoylity.find({}, {'_id': 0}))
-        return jsonify(invoices), 200
+        return format_response(True, "Invoices retrieved successfully.", invoices, 200)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return format_response(False, str(e), None, 500)
+
+@enoylity_bp.route('/getlist', methods=['POST'])
+def search_invoices():
+    body = request.get_json() or {}
+    search     = body.get('search', '').strip()
+    page       = max(int(body.get('page', 1)), 1)
+    per_page   = max(int(body.get('per_page', 10)), 1)
+    filters = {}
+
+    if search:
+        filters['$or'] = [
+            {'invoice_number': {'$regex': search, '$options': 'i'}},
+            {'bill_to.name':    {'$regex': search, '$options': 'i'}},
+            {'bill_to.email':   {'$regex': search, '$options': 'i'}},
+        ]
+
+    start_str = body.get('start_date')
+    end_str   = body.get('end_date')
+    if start_str and end_str:
+        try:
+            start_dt = datetime.strptime(start_str, '%d-%m-%Y')
+            end_dt   = datetime.strptime(end_str,   '%d-%m-%Y')
+            filters['created_at'] = {'$gte': start_dt, '$lte': end_dt}
+        except ValueError:
+            return format_response(False, "Dates must be in DD-MM-YYYY format", None, 400)
+
+    total_items = db.invoiceenoylity.count_documents(filters)
+    cursor = (db.invoiceenoylity
+              .find(filters, {'_id': 0})
+              .sort('created_at', -1)
+              .skip((page - 1) * per_page)
+              .limit(per_page))
+    invoices   = list(cursor)
+    total_pages = math.ceil(total_items / per_page) if per_page else 0
+
+    payload = {
+        "setlist":     invoices,
+        "page":        page,
+        "per_page":    per_page,
+        "total_items": total_items,
+        "total_pages": total_pages
+    }
+    return format_response(True, "Search results returned.", payload, 200)
