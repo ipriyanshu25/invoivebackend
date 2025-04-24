@@ -1,4 +1,4 @@
-from flask import Blueprint, request, send_file, abort
+from flask import Blueprint, request, send_file, abort, make_response
 from flask_pymongo import PyMongo
 from bson import ObjectId
 from datetime import datetime
@@ -241,10 +241,24 @@ def get_payslips():
 
 @employee_bp.route('/viewpdf/<payslip_id>', methods=['GET'])
 def view_payslip_pdf(payslip_id):
+    # Look up the payslip record
     payslip = db.payslips.find_one({"payslipId": payslip_id})
     if not payslip:
         abort(404)
+
+    # Build full file path
     file_path = os.path.join('path/to/salary/slips', payslip['filename'])
     if not os.path.exists(file_path):
         return format_response(False, "Payslip PDF file not found", status=404)
-    return send_file(file_path, mimetype='application/pdf', as_attachment=True, download_name=payslip['filename'])
+
+    # Send PDF inline
+    response = make_response(send_file(
+        file_path,
+        mimetype='application/pdf',
+        as_attachment=False      # <-- inline, not download
+    ))
+    # Explicitly set disposition to inline
+    response.headers['Content-Disposition'] = (
+        f'inline; filename="{payslip["filename"]}"'
+    )
+    return response

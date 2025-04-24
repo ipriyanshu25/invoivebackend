@@ -8,44 +8,40 @@ from pymongo import ReturnDocument
 
 from utils import format_response
 from db import db
+from settings import get_current_settings  # dynamic settings fetch
 
-# Blueprint for Enoylity Studio invoices
-invoice_enoylity_bp = Blueprint("invoiceEnoylity", __name__, url_prefix="/invoiceEnoy")
+invoice_enoylity_bp = Blueprint("invoiceEnoylity", __name__, url_prefix="/invoiceEnoylity")
 
-# Fixed company details
-COMPANY_DETAILS = {
-    'name': 'Enoylity Studio',
-    'tagline': 'Enoylity Media Creations Private Limited',
-    'address': (
+# Static fallback defaults (used only if no settings are found)
+DEFAULT_SETTINGS = {
+    'company_name': 'Enoylity Studio',
+    'company_tagline': 'Enoylity Media Creations Private Limited',
+    'company_address': (
         'Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square\n'
         'Nari Road, Nagpur, Maharashtra, India 440026'
     ),
-    'email': 'support@enoylity.com',
-    'phone': '+919284290181',
+    'company_email': 'support@enoylity.com',
+    'company_phone': '+919284290181',
     'website': 'https://www.enoylitystudio.com/',
-    'bank_details': (
-        'Account name: Enoylity Media Creations LLC\n'
-        'Account Number: 8489753859\n'
-        'ACH routing number: 026073150\n'
-        'Fedwire routing number: 026073008\n'
-        'SWIFT code: CMFGUS33\n'
-        'Account location: United States\n'
-        'Bank name: Community Federal Savings Bank\n'
-        'Bank address: 89-16 Jamaica Ave, Woodhaven, NY, United States, 11421\n'
-        'Account Type: Checking'
-    )
+    'bank_details': {
+        'account_name':        'Enoylity Media Creations LLC',
+        'account_number':      '8489753859',
+        'ach_routing_number':  '026073150',
+        'fedwire_routing_no':  '026073008',
+        'swift_code':          'CMFGUS33',
+        'account_location':    'United States',
+        'bank_name':           'Community Federal Savings Bank',
+        'bank_address':        '89-16 Jamaica Ave, Woodhaven, NY, United States, 11421',
+        'account_type':        'Checking'
+    }
 }
 
-# Logo handling setup
+# Logo handling
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 LOGO_URL = 'https://www.enoylitystudio.com/wp-content/uploads/2024/02/enoylity-final-logo.png'
 LOGO_FILENAME = 'enoylity-final-logo.png'
 LOGO_PATH = os.path.join(ASSETS_DIR, LOGO_FILENAME)
-
-# Ensure assets directory exists
 os.makedirs(ASSETS_DIR, exist_ok=True)
-
-# Download logo if missing
 if not os.path.isfile(LOGO_PATH):
     try:
         resp = requests.get(LOGO_URL, timeout=5)
@@ -58,10 +54,8 @@ if not os.path.isfile(LOGO_PATH):
 class InvoicePDF(FPDF):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Register Lexend fonts (ensure .ttf files are in 'static/' directory)
         self.add_font('Lexend', '', os.path.join('static', 'Lexend-Regular.ttf'), uni=True)
         self.add_font('Lexend', 'B', os.path.join('static', 'Lexend-Bold.ttf'), uni=True)
-        
         self.invoice_data = None
         self.logo_path = LOGO_PATH if os.path.isfile(LOGO_PATH) else None
         self.light_blue = (235, 244, 255)
@@ -69,15 +63,13 @@ class InvoicePDF(FPDF):
         self.medium_blue = (100, 149, 237)
 
     def header(self):
-        if self.page_no() > 1:
-            if self.logo_path:
-                logo_w = 20
-                x = self.w - self.r_margin - logo_w
-                try:
-                    self.image(self.logo_path, x=x, y=8, w=logo_w)
-                except Exception as e:
-                    print(f"Failed to add logo to header: {e}")
-                
+        if self.page_no() > 1 and self.logo_path:
+            logo_w = 20
+            x = self.w - self.r_margin - logo_w
+            try:
+                self.image(self.logo_path, x=x, y=8, w=logo_w)
+            except Exception as e:
+                print(f"Failed to add logo to header: {e}")
         if self.invoice_data:
             self.set_font('Lexend', 'B', 10)
             self.set_text_color(*self.dark_blue)
@@ -87,17 +79,13 @@ class InvoicePDF(FPDF):
         self.set_y(-20)
         self.set_font('Lexend', '', 8)
         self.set_text_color(100, 100, 100)
-        
-        # Contact information
         if self.invoice_data:
             contact = (
-                f"{COMPANY_DETAILS['company_email']} | "
-                f"{COMPANY_DETAILS['company_phone']} | "
-                f"{COMPANY_DETAILS['website']}"
+                f"{self.invoice_data['company_email']} | "
+                f"{self.invoice_data['company_phone']} | "
+                f"{self.invoice_data['website']}"
             )
             self.cell(0, 4, contact, 0, 1, 'C')
-        
-        # Page number
         self.cell(0, 4, f'Page {self.page_no()}', 0, 1, 'C')
 
 
@@ -106,73 +94,68 @@ def create_invoice(invoice_data):
     pdf.invoice_data = invoice_data
     pdf.add_page()
 
-    # First-page styled header
+    # First-page header
     pdf.set_fill_color(*pdf.light_blue)
     pdf.rect(10, 10, 190, 50, 'F')
-    
-    # Use the locally stored logo file
     if pdf.logo_path:
         try:
-            pdf.image(pdf.logo_path, x=0, y=22, w=90) # Adjusted position and size
-        except Exception as e:
-            print(f"Failed to add logo to PDF: {e}")
+            pdf.image(pdf.logo_path, x=0, y=22, w=90)
+        except Exception:
+            pass
 
-    # Company name & tagline
-    pdf.set_xy(55, 15)
+    pdf.set_xy(65, 15)
     pdf.set_font('Lexend', 'B', 20)
     pdf.set_text_color(*pdf.dark_blue)
-    pdf.cell(130, 12, COMPANY_DETAILS['company_name'], align='R')
-    pdf.set_xy(55, 27)
-    pdf.set_font('Lexend', '', 12)
-    pdf.cell(130, 8, COMPANY_DETAILS['company_tagline'], align='R')
-    
-    # Company address right under company name
-    pdf.set_xy(55, 35)
-    pdf.set_font('Lexend', '', 8)
-    pdf.multi_cell(130, 4, COMPANY_DETAILS['company_address'], align='R')
+    pdf.cell(130, 12, invoice_data['company_name'], align='R')
 
-    # Client & Invoice Details Sections
+    pdf.set_xy(65, 27)
+    pdf.set_font('Lexend', '', 12)
+    pdf.cell(130, 8, invoice_data['company_tagline'], align='R')
+
+    pdf.set_xy(65, 35)
+    pdf.set_font('Lexend', '', 8)
+    pdf.multi_cell(130, 4, invoice_data['company_address'], align='R')
+
+    # Client & Invoice Details
     y = 70
     pdf.set_fill_color(*pdf.light_blue)
-    
-    # Client Details - Left Box
     pdf.rect(10, y, 95, 52, 'F')
     pdf.set_xy(15, y + 5)
     pdf.set_font('Lexend', 'B', 11)
     pdf.set_text_color(*pdf.dark_blue)
     pdf.cell(85, 6, 'Bill To', ln=1)
+
     pdf.set_font('Lexend', '', 10)
     pdf.set_xy(15, y + 13)
-    pdf.cell(85, 6, invoice_data['client_name'], ln=1)
-    pdf.set_xy(15, y + 19)
-    pdf.multi_cell(75, 5, invoice_data['client_address'])
-    pdf.set_xy(15, y + 34)
-    pdf.cell(85, 6, invoice_data['client_email'], ln=1)
-    pdf.set_xy(15, y + 40)
-    pdf.cell(85, 6, invoice_data.get('client_phone', ''), ln=1)
+    pdf.multi_cell(75, 5, "\n".join([
+        invoice_data['client_name'],
+        invoice_data['client_address'],
+        invoice_data.get('client_email', ''),
+        invoice_data.get('client_phone', '')
+    ]))
 
-    # Invoice Details - Right Box
     pdf.rect(115, y, 85, 52, 'F')
     pdf.set_xy(120, y + 5)
     pdf.set_font('Lexend', 'B', 11)
     pdf.set_text_color(*pdf.dark_blue)
     pdf.cell(75, 6, 'Invoice Details', ln=1)
+
     pdf.set_font('Lexend', '', 10)
-    
-    # Invoice metadata
-    pdf.set_xy(120, y + 13)
-    pdf.cell(75, 6, f"Invoice Number: {invoice_data['invoice_number']}", ln=1)
-    pdf.set_xy(120, y + 19)
-    pdf.cell(75, 6, f"Bill Date: {invoice_data['date']}", ln=1)
-    pdf.set_xy(120, y + 25)
-    pdf.cell(75, 6, f"Due Date: {invoice_data['due_date']}", ln=1)
-    pdf.set_xy(120, y + 31)
-    pdf.cell(75, 6, f"Payment Method: {invoice_data['payment_method_text']}", ln=1)
+    for i, (label, key) in enumerate([
+        ("Invoice Number:", 'invoice_number'),
+        ("Bill Date:", 'invoice_date'),
+        ("Due Date:", 'due_date'),
+        ("Payment Method:", 'payment_method_text')
+    ]):
+        pdf.set_xy(120, y + 13 + i*6)
+        pdf.cell(40, 6, label, 0, 0)
+        pdf.cell(35, 6, invoice_data[key], 0, 1)
 
     # Items table header
     y = 130
     pdf.set_fill_color(*pdf.light_blue)
     pdf.rect(10, y, 190, 12, 'F')
+
     pdf.set_xy(15, y + 3)
     pdf.set_font('Lexend', 'B', 10)
     pdf.set_text_color(*pdf.dark_blue)
@@ -181,89 +164,103 @@ def create_invoice(invoice_data):
     pdf.cell(30, 6, 'PRICE', 0, 0, 'R')
     pdf.cell(30, 6, 'TOTAL', 0, 1, 'R')
 
-    # Iterate items with dynamic pagination
+    # Iterate items
     y = 145
-    first_limit = pdf.h - 100
+    bottom_limit = pdf.h - 60
+    pdf.set_font('Lexend', '', 10)
+    pdf.set_text_color(80, 80, 80)
     running_sub = 0
+
     for item in invoice_data['items']:
-        if y + 12 > first_limit:
+        if y > bottom_limit:
             pdf.add_page()
             y = 35
+        desc = item['description']
+        if len(desc) > 50:
+            desc = desc[:50] + '…'
+        total = item['quantity'] * item['price']
+        running_sub += total
+
         pdf.set_xy(15, y)
-        pdf.set_font('Lexend', '', 10)
-        pdf.set_text_color(80, 80, 80)
-        desc = (item['description'][:50] + '...') if len(item['description']) > 50 else item['description']
         pdf.cell(90, 6, desc, 0, 0, 'L')
         pdf.cell(25, 6, str(item['quantity']), 0, 0, 'C')
         pdf.cell(30, 6, f"${item['price']:.2f}", 0, 0, 'R')
-        total = item['quantity'] * item['price']
-        running_sub += total
         pdf.cell(30, 6, f"${total:.2f}", 0, 1, 'R')
-        y += 12
+
+        y += 8
         pdf.set_draw_color(*pdf.medium_blue)
         pdf.line(15, y, 190, y)
-        y += 2
+        y += 4
 
-    # Summary block
-    if y > pdf.h - 80:
+    # Summary
+    if y > bottom_limit:
         pdf.add_page()
         y = 35
     y += 10
     pdf.set_xy(120, y)
     pdf.set_font('Lexend', '', 10)
-    pdf.cell(40, 8, 'Sub Total', 0, 0, 'L')
+    pdf.set_text_color(*pdf.dark_blue)
+    pdf.cell(40, 8, 'Sub Total', 0, 0)
     pdf.cell(30, 8, f"${invoice_data['subtotal']:.2f}", 0, 1, 'R')
-    y += 8
+
     if invoice_data.get('paypal_fee', 0) > 0:
-        pdf.set_xy(120, y)
-        pdf.cell(40, 8, 'PayPal Fee', 0, 0, 'L')
-        pdf.cell(30, 8, f"${invoice_data['paypal_fee']:.2f}", 0, 1, 'R')
         y += 8
-        pdf.set_draw_color(*pdf.medium_blue)
-        pdf.line(120, y, 190, y)
+        pdf.set_xy(120, y)
+        pdf.cell(40, 8, 'PayPal Fee', 0, 0)
+        pdf.cell(30, 8, f"${invoice_data['paypal_fee']:.2f}", 0, 1, 'R')
+
+    line_y = y + (16 if invoice_data.get('paypal_fee',0)>0 else 8)
     pdf.set_draw_color(*pdf.medium_blue)
-    pdf.line(120, y, 190, y)
-    y += 8
+    pdf.line(120, line_y, 190, line_y)
+
+    y = line_y + (8 if invoice_data.get('paypal_fee',0)>0 else 8)
     pdf.set_xy(120, y)
     pdf.set_font('Lexend', 'B', 12)
-    pdf.set_text_color(*pdf.dark_blue)
-    pdf.cell(40, 8, 'Grand Total', 0, 0, 'L')
+    pdf.cell(40, 8, 'Grand Total', 0, 0)
     pdf.cell(30, 8, f"${invoice_data['total']:.2f}", 0, 1, 'R')
 
-    # Footer sections for bank details and notes
+    # Bank Details & Notes
     y += 20
-    if y > pdf.h - 80:
+    if y > bottom_limit:
         pdf.add_page()
         y = 35
-    
-    # Bank Details - Left Section
-    pdf.set_xy(15, y)
+
+    pdf.set_xy(10, y)
     pdf.set_font('Lexend', 'B', 10)
     pdf.set_text_color(*pdf.dark_blue)
     pdf.cell(85, 6, 'BANK DETAILS', ln=1)
-    pdf.set_xy(15, y + 8)
+
+    bank = invoice_data['bank_details']
+    bank_lines = [
+        f"Account name: {bank['account_name']}",
+        f"Account Number: {bank['account_number']}",
+        f"ACH routing number: {bank['ach_routing_number']}",
+        f"Fedwire routing number: {bank['fedwire_routing_no']}",
+        f"SWIFT code: {bank['swift_code']}",
+        f"Account location: {bank['account_location']}",
+        f"Bank name: {bank['bank_name']}",
+        f"Bank address: {bank['bank_address']}",
+        f"Account Type: {bank['account_type']}"
+    ]
     pdf.set_font('Lexend', '', 9)
     pdf.set_text_color(80, 80, 80)
-    pdf.multi_cell(85, 5, COMPANY_DETAILS.get('bank_details', 'Bank details not provided'))
-    
-    # Notes Section - Right Side
+    pdf.multi_cell(85, 5, "\n".join(bank_lines))
+
     pdf.set_xy(115, y)
     pdf.set_font('Lexend', 'B', 10)
     pdf.set_text_color(*pdf.dark_blue)
     pdf.cell(75, 6, 'NOTES', ln=1)
-    pdf.set_xy(115, y + 8)
+
+    y = pdf.get_y()
+    pdf.set_xy(115, y)
     pdf.set_font('Lexend', '', 9)
     pdf.set_text_color(80, 80, 80)
-    pdf.multi_cell(85, 5, invoice_data['notes'])
+    pdf.multi_cell(90, 9, invoice_data.get('notes', ''))
 
     return pdf.output(dest='S').encode('latin1')
 
 
 def get_next_invoice_number():
-    """
-    Atomically increment and return the next invoice number.
-    Uses a counter document in MongoDB named 'Enoylity Studio counter'.
-    """
     counter = db.invoice_counters.find_one_and_update(
         {"_id": "Enoylity Studio counter"},
         {"$inc": {"sequence_value": 1}},
@@ -278,26 +275,17 @@ def get_next_invoice_number():
 def generate_invoice_route():
     try:
         data = request.get_json() or {}
-        required = [
-            'date', 'client_name', 'client_address'
-        ]
-        for field in required:
+        for field in ['invoice_date', 'client_name', 'client_address']:
             if field not in data:
                 return format_response(False, f"Missing required field: {field}", status=400)
 
-        # Generate and attach invoice number
-        invoice_number = get_next_invoice_number()
-        data['invoice_number'] = invoice_number
-
-        # Parse dates
-        try:
-            inv_date = datetime.datetime.strptime(data['date'], '%d-%m-%Y')
-        except ValueError:
-            return format_response(False, "Invalid date format for 'date'. Use DD-MM-YYYY", status=400)
+        # assign number & dates
+        data['invoice_number'] = get_next_invoice_number()
+        inv_date = datetime.datetime.strptime(data['invoice_date'], '%d-%m-%Y')
         due = inv_date + datetime.timedelta(days=7)
         data['due_date'] = due.strftime('%d-%m-%Y')
 
-        # Calculate totals
+        # items & totals
         items = data['items']
         subtotal = sum(i['quantity'] * i['price'] for i in items)
         data['subtotal'] = subtotal
@@ -305,37 +293,60 @@ def generate_invoice_route():
         paypal_fee = round(subtotal * 0.055, 2) if pm == 0 else 0.0
         data['paypal_fee'] = paypal_fee
         data['total'] = subtotal + paypal_fee
-        
-        # Set payment method text
-        payment_methods = {0: "PayPal", 1: "Bank Transfer"}
-        data['payment_method_text'] = payment_methods.get(pm, "Other")
+        data['payment_method_text'] = {0: "PayPal", 1: "Bank Transfer"}.get(pm, "Other")
 
-        # Format address and merge details
         data['client_address'] = data['client_address'].replace(', ', '\n')
-        invoice_data = {**COMPANY_DETAILS, **data}
 
-        # Create PDF
+        # dynamic settings merge
+        settings = get_current_settings("Enoylity Studio") or {}
+
+        # 1) Define your defaults for the company info
+        company_defaults = {
+            'company_name':    DEFAULT_SETTINGS['company_name'],
+            'company_tagline': DEFAULT_SETTINGS['company_tagline'],
+            'company_address': DEFAULT_SETTINGS['company_address'],
+            'company_email':   DEFAULT_SETTINGS['company_email'],
+            'company_phone':   DEFAULT_SETTINGS['company_phone'],
+            'website':         DEFAULT_SETTINGS['website'],
+        }
+
+        # 2) Overlay (merge) any fields from settings['company_info']
+        #    so missing keys fall back to company_defaults.
+        raw = settings.get('company_info', {}) or {}
+        company_info = {**company_defaults, **raw}
+
+        # 3) Do the same for bank details
+        bank_defaults = DEFAULT_SETTINGS['bank_details']
+        raw_bank    = settings.get('bank_details', {}) or {}
+        bank_details = {**bank_defaults, **raw_bank}
+
+        # 4) Finally build your invoice_data
+        invoice_data = {
+            **company_info,
+            'bank_details': bank_details,
+            **data
+        }
+
         pdf_bytes = create_invoice(invoice_data)
 
-        # Save record in DB
+        # persist & respond
         record = invoice_data.copy()
         record['created_at'] = datetime.datetime.now()
         db.invoiceEnoylity.insert_one(record)
 
-        # Send file
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
         return send_file(
             buf,
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f"invoice_{invoice_number}.pdf"
+            download_name=f"invoice_{data['invoice_number']}.pdf"
         )
-
+    except ValueError:
+        return format_response(False, "Invalid date format for 'invoice_date'. Use DD-MM-YYYY", status=400)
     except Exception as e:
-        print(f"Error generating invoice: {str(e)}")
+        print(f"Error generating invoice: {e}")
         return format_response(False, "Internal server error", status=500)
-
 
 @invoice_enoylity_bp.route('/getlist', methods=['POST'])
 def get_invoice_list():
@@ -352,7 +363,7 @@ def get_invoice_list():
                 '$or': [
                     {'invoice_number': regex},
                     {'client_name': regex},
-                    {'date': regex}
+                    {'invoice_date': regex}
                 ]
             }
 
@@ -375,8 +386,3 @@ def get_invoice_list():
     except Exception as e:
         print(f"Error retrieving invoice list: {str(e)}")
         return format_response(False, 'Internal server error', status=500)
-
-
-
-
-    

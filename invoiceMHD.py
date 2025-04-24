@@ -9,10 +9,13 @@ from pymongo import ReturnDocument
 from utils import format_response
 from db import db
 
+# Import helper to fetch editable fields
+from settings import get_current_settings
+
 # Configure logging
 logging.basicConfig(level=logging.ERROR)
 
-invoice_bp = Blueprint("invoice", __name__, url_prefix="/invoice")
+invoice_bp = Blueprint("invoice", __name__, url_prefix="/invoiceMHD")
 
 # Default settings for invoice template
 DEFAULT_SETTINGS = {
@@ -37,29 +40,6 @@ DEFAULT_SETTINGS = {
     }
 }
 
-# Helper: load or initialize settings from MongoDB
-def load_invoice_settings():
-    # ensure default settings exist
-    db.invoice_settings.update_one(
-        {"_id": DEFAULT_SETTINGS["_id"]},
-        {"$setOnInsert": DEFAULT_SETTINGS},
-        upsert=True
-    )
-    # fetch settings
-    raw = db.invoice_settings.find_one({"_id": DEFAULT_SETTINGS["_id"]}) or {}
-    # deep merge defaults with raw settings
-    import copy
-    merged = copy.deepcopy(DEFAULT_SETTINGS)
-    # raw may contain _id
-    for key, val in raw.items():
-        if key == '_id':
-            continue
-        if isinstance(val, dict) and key in merged:
-            merged[key].update(val)
-        else:
-            merged[key] = val
-    return merged
-
 # PDF generator using dynamic settings
 class InvoicePDF(FPDF):
     def __init__(self, settings, *args, **kwargs):
@@ -81,7 +61,7 @@ class InvoicePDF(FPDF):
         self.cell(0, 6, ci['address'], ln=1)
         self.cell(0, 6, ci['city_state'], ln=1)
         self.cell(0, 6, f"Phone: {ci['phone']}", ln=1)
-        self.cell(0, 6, ci['youtube'], ln=1)
+        self.cell(0, 6, ci.get('youtube', ''), ln=1)
         self.cell(0, 6, ci['email'], ln=1)
         self.ln(12)
 
@@ -105,37 +85,54 @@ def get_next_invoice_number():
 @invoice_bp.route('/generate-invoice', methods=['POST'])
 def generate_invoice_endpoint():
     try:
-        settings = load_invoice_settings()
+        # 1️⃣ Fetch editable fields for the "MHD" invoice type
+        raw = db.settings_invoice.find_one({"invoice_type": "MHD Tech"}) or {}
+        editable = raw.get("editable_fields", {})
+        print(editable)
+        # 2️⃣ Merge into defaults (without mutating them)
+        import copy
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        for key, val in editable.items():
+            if isinstance(val, dict) and key in settings:
+                settings[key].update(val)
+            else:
+                settings[key] = val
+
+        # 4️⃣ Validate payload
         data = request.get_json() or {}
-        for field in ("bill_to_name", "bill_to_address", "bill_to_city", "bill_to_email", "invoice_date", "due_date", "notes"):  # noqa
+        required = ("bill_to_name", "bill_to_address", "bill_to_city",
+                    "bill_to_email", "invoice_date", "due_date", "notes")
+        for field in required:
             if field not in data:
                 return format_response(False, f"Missing required field: {field}", status=400)
 
+        # 5️⃣ Parse fields
         bt_name = data['bill_to_name']
         bt_addr = data['bill_to_address']
         bt_city = data['bill_to_city']
         bt_mail = data['bill_to_email']
-        note = data['notes']
-        items = data.get('items', [])
+        note    = data['notes']
+        items   = data.get('items', [])
         payment_method = int(data.get('payment_method', 0))
 
         inv_no = get_next_invoice_number()
+        # Validate dates
         try:
             datetime.strptime(data['invoice_date'], '%d-%m-%Y')
-            datetime.strptime(data['due_date'], '%d-%m-%Y')
+            datetime.strptime(data['due_date'],   '%d-%m-%Y')
         except ValueError:
             return format_response(False, "Invalid date format. Use DD-MM-YYYY", status=400)
 
-        # Build PDF
+        # 6️⃣ Build PDF
         pdf = InvoicePDF(settings)
         pdf.invoice_number = inv_no
-        pdf.invoice_date = data['invoice_date']
-        pdf.due_date = data['due_date']
+        pdf.invoice_date   = data['invoice_date']
+        pdf.due_date       = data['due_date']
         pdf.add_page()
 
-        # Bill To
+        # Bill To block
         lines = ["Bill To:"] + [bt_name, bt_addr, bt_city, bt_mail]
-        heights = [8] + [6] * (len(lines) - 1)
+        heights = [8] + [6]*(len(lines)-1)
         block_w = pdf.w - pdf.l_margin - pdf.r_margin
         x, y = pdf.get_x(), pdf.get_y()
         pdf.set_fill_color(*settings['colors']['light_pink'])
@@ -148,21 +145,26 @@ def generate_invoice_endpoint():
             y += h
         pdf.ln(4)
 
-        # Invoice Details
-        details = ["Invoice Details:", f"Invoice #: {inv_no}", f"Bill Date: {data['invoice_date']}", f"Due Date: {data['due_date']}"]
+        # Invoice Details block
+        details = [
+            "Invoice Details:",
+            f"Invoice #: {inv_no}",
+            f"Bill Date: {data['invoice_date']}",
+            f"Due Date: {data['due_date']}"
+        ]
         d_heights = [8] + [7]*(len(details)-1)
         x, y = pdf.get_x(), pdf.get_y()
         pdf.set_fill_color(*settings['colors']['light_pink'])
         pdf.rect(x, y, block_w, sum(d_heights), 'F')
         pdf.set_text_color(*settings['colors']['black'])
-        for h, txt, style in zip(d_heights, details, ['B']+['']*(len(details)-1)):
+        for h, txt, style in zip(d_heights, details, ['B'] + ['']*(len(details)-1)):
             pdf.set_font('Lexend', style, 12 if style=='B' else 11)
             pdf.set_xy(x, y)
             pdf.cell(0, h, txt, ln=1)
             y += h
         pdf.ln(10)
 
-        # Items Table
+        # Items table header
         pdf.set_fill_color(*settings['colors']['dark_pink'])
         pdf.set_text_color(255,255,255)
         pdf.set_font('Lexend','B',12)
@@ -170,6 +172,8 @@ def generate_invoice_endpoint():
         pdf.cell(30,10,'RATE',0,0,'C',fill=True)
         pdf.cell(20,10,'QTY',0,0,'C',fill=True)
         pdf.cell(45,10,'AMOUNT',0,1,'C',fill=True)
+
+        # Items rows
         pdf.set_text_color(*settings['colors']['black'])
         pdf.set_font('Lexend','',11)
         subtotal = 0
@@ -184,7 +188,7 @@ def generate_invoice_endpoint():
             pdf.cell(20,8,str(qty),0,0,'C')
             pdf.cell(45,8,f'${amt:.2f}',0,1,'C')
 
-        # PayPal Fee
+        # PayPal fee if applicable
         if payment_method == 0:
             fee = round(subtotal * 0.055, 2)
             total = subtotal + fee
@@ -203,15 +207,20 @@ def generate_invoice_endpoint():
         pdf.cell(45,10,f'USD ${total:.2f}',0,1,'R')
         pdf.ln(10)
 
-        # Note
+        # Notes
         pdf.set_font('Lexend','',12)
         pdf.set_text_color(*settings['colors']['black'])
         pdf.multi_cell(0,6,'Note: ' + note,0,'L')
 
-        # Save record (including notes)
-        db.mhdinvoice.insert_one({
+        # Save record
+        db.invoiceMHD.insert_one({
             'invoice_number': inv_no,
-            'bill_to': {'name': bt_name, 'address': bt_addr, 'city': bt_city, 'email': bt_mail},
+            'bill_to': {
+                'name': bt_name,
+                'address': bt_addr,
+                'city': bt_city,
+                'email': bt_mail
+            },
             'items': items,
             'invoice_date': data['invoice_date'],
             'due_date': data['due_date'],
@@ -220,51 +229,53 @@ def generate_invoice_endpoint():
             'payment_method': payment_method
         })
 
+        # Stream PDF back to client
         buf = io.BytesIO(pdf.output(dest='S').encode('latin1'))
         buf.seek(0)
-        return send_file(buf, mimetype='application/pdf', as_attachment=True, download_name=f"invoice_{inv_no}.pdf")
+        return send_file(
+            buf,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"invoice_{inv_no}.pdf"
+        )
 
     except Exception:
         logging.exception("Error generating invoice")
         return format_response(False, "Internal server error", status=500)
 
-# Retrieve invoice list
+
 @invoice_bp.route('/getlist', methods=['POST'])
 def get_invoice_list():
     try:
         data = request.get_json() or {}
-        page = int(data.get('page',1))
-        per_page = int(data.get('per_page',10))
-        search = (data.get('search') or '').strip()
+        page     = int(data.get('page', 1))
+        per_page = int(data.get('per_page', 10))
+        search   = (data.get('search') or '').strip()
+
         criteria = {}
         if search:
-            regex = {'$regex': search, '$options':'i'}
-            criteria = {'$or':[
-                {'invoice_number':regex},
-                {'bill_to.name':regex},
-                {'invoice_date':regex},
-                {'due_date':regex}
+            regex = {'$regex': search, '$options': 'i'}
+            criteria = {'$or': [
+                {'invoice_number': regex},
+                {'bill_to.name':  regex},
+                {'invoice_date':  regex},
+                {'due_date':      regex}
             ]}
-        skip = (page-1)*per_page
-        cursor = db.mhdinvoice.find(criteria).skip(skip).limit(per_page)
-        invoices = [{**inv, '_id':str(inv['_id'])} for inv in cursor]
-        total = db.mhdinvoice.count_documents(criteria)
-        return format_response(True,'Invoice list retrieved', data={'invoices':invoices,'total':total,'page':page,'per_page':per_page})
-    except Exception:
-        return format_response(False,'Internal server error', status=500)
 
-# Settings endpoint using GET & POST only
-@invoice_bp.route('/settings', methods=['GET','POST'])
-def invoice_settings_endpoint():
-    if request.method == 'GET':
-        settings = load_invoice_settings()
-        return format_response(True, "Settings fetched successfully", data=settings)
-    new = request.get_json() or {}
-    updated = db.invoice_settings.find_one_and_update(
-        {'_id':'default'},
-        {'$set': new},
-        upsert=True,
-        return_document=ReturnDocument.AFTER
-    )
-    updated.pop('_id',None)
-    return format_response(True,'Settings updated', data=updated)
+        skip    = (page - 1) * per_page
+        cursor  = db.invoiceMHD.find(criteria).skip(skip).limit(per_page)
+        invoices = [{**inv, '_id': str(inv['_id'])} for inv in cursor]
+        total    = db.invoiceMHD.count_documents(criteria)
+
+        return format_response(
+            True,
+            'Invoice list retrieved',
+            data={
+                'invoices': invoices,
+                'total': total,
+                'page': page,
+                'per_page': per_page
+            }
+        )
+    except Exception:
+        return format_response(False, 'Internal server error', status=500)

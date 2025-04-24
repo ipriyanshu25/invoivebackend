@@ -7,14 +7,15 @@ import string
 from datetime import datetime
 from pymongo import ReturnDocument
 import importlib
+
 # Blueprint setup
 settings_bp = Blueprint("settings", __name__, url_prefix="/settings")
 
 # Invoice modules to load default settings from
 INVOICE_MODULES = {
-    "MHD": "invoice",  # MHD Tech invoice module
+    "MHD Tech": "invoiceMHD",  # MHD Tech invoice module
     "Enoylity Studio": "invoiceEnoylity",  # Enoylity Studio invoice module
-    "Enoylity Tech": "invoiceenoylitytech"  # Enoylity Tech invoice module
+    "Enoylity Media Creations LLC": "invoiceEnoylityLLC"  # Enoylity Tech invoice module
 }
 
 def generate_unique_id():
@@ -27,7 +28,7 @@ def extract_company_info(module_name):
         module = importlib.import_module(module_name)
         
         # Handle different structure based on module
-        if module_name == "invoice":
+        if module_name == "invoiceMHD":
             # MHD Tech
             return {"company_info": module.DEFAULT_SETTINGS.get("company_info", {})}
         
@@ -46,9 +47,9 @@ def extract_company_info(module_name):
                 "bank_details": company_details.get("bank_details", "")
             }
         
-        elif module_name == "invoiceenoylitytech":
+        elif module_name == "invoiceEnoylityLLC":
             # Enoylity Tech
-            return {"company_info": module.COMPANY_INFO}
+            return {"company_info": module.DEFAULT_SETTINGS.get("company_info", {})}
         
         return {}
     

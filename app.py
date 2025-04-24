@@ -4,9 +4,9 @@ from admin import admin_bp
 from employee import employee_bp
 from subadmin import subadmin_bp
 from salaryslip import salary_bp
-from invoice import invoice_bp
+from invoiceMHD import invoice_bp
 from invoiceEnoylity import invoice_enoylity_bp
-from invoiceenoylitytech import enoylity_bp
+from invoiceEnoylityLLC import enoylity_bp
 from settings import settings_bp
 
 
