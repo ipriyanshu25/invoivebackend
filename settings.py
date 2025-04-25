@@ -18,6 +18,14 @@ INVOICE_MODULES = {
     "Enoylity Media Creations LLC": "invoiceEnoylityLLC"  # Enoylity Tech invoice module
 }
 
+# Default salary slip company information
+DEFAULT_SALARY_SLIP_INFO = {
+    "company_title":"ENOYLITY MEDIA CREATIONS",
+    "company_name": "Enoylity Media Creations Private Limited",
+    "address_line1": "Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square",
+    "address_line2": "Nari Road, Nagpur, Maharashtra, India 440026"
+}
+
 def generate_unique_id():
     """Generate a unique 16-digit ID"""
     return ''.join(random.choices(string.digits, k=16))
@@ -81,6 +89,26 @@ def get_or_create_invoice_settings(invoice_type):
         
         # Insert into database
         db.settings_invoice.insert_one(settings)
+    
+    return settings
+
+def get_or_create_salary_settings():
+    """Get or create settings for salary slip"""
+    # Try to find existing settings
+    settings = db.settings_salary.find_one({"settings_type": "salary_slip"})
+    
+    if not settings:
+        # Create new settings
+        settings = {
+            "settings_id": generate_unique_id(),
+            "settings_type": "salary_slip",
+            "created_at": datetime.now(),
+            "last_updated": datetime.now(),
+            "company_info": DEFAULT_SALARY_SLIP_INFO
+        }
+        
+        # Insert into database
+        db.settings_salary.insert_one(settings)
     
     return settings
 
@@ -210,6 +238,86 @@ def restore_default_settings():
     return format_response(True, f"Default settings restored for {settings_id}", data=updated)
 
 
+# ======= NEW SALARY SLIP SETTINGS ROUTES =======
+
+@settings_bp.route('/salary', methods=['GET'])
+def get_salary_settings():
+    """Get salary slip settings"""
+    settings = get_or_create_salary_settings()
+    
+    # Convert ObjectId to string for JSON serialization
+    settings["_id"] = str(settings["_id"])
+    
+    return format_response(
+        True,
+        "Salary slip settings retrieved successfully",
+        data=settings
+    )
+
+
+@settings_bp.route('/salary', methods=['POST'])
+def update_salary_settings():
+    """Update company info for salary slip settings"""
+    data = request.get_json() or {}
+
+    settings_id = data.get("settings_id")
+    company_info = data.get("company_info", {})
+
+    if not settings_id:
+        return format_response(False, "No settings_id provided", status=400)
+    if not company_info:
+        return format_response(False, "No company_info provided", status=400)
+
+    # Fetch the existing document using settings_id
+    settings = db.settings_salary.find_one({"settings_id": settings_id})
+    if not settings:
+        return format_response(False, "Settings not found", status=404)
+
+    # Merge the existing company_info with the new one
+    existing_info = settings.get("company_info", {})
+    updated_info = {**existing_info, **company_info}
+
+    # Update the document in DB
+    result = db.settings_salary.update_one(
+        {"settings_id": settings_id},
+        {"$set": {
+            "company_info": updated_info,
+            "last_updated": datetime.now()
+        }}
+    )
+
+    if result.modified_count == 0:
+        return format_response(False, "No changes made to settings", status=400)
+
+    updated = db.settings_salary.find_one({"settings_id": settings_id})
+    updated["_id"] = str(updated.get("_id"))  # convert _id to string if exists
+
+    return format_response(True, "Salary slip settings updated", data=updated)
+
+
+
+@settings_bp.route('/salary/restore', methods=['POST'])
+def restore_salary_settings():
+    """Restore default salary slip settings"""
+    # Update with default settings
+    result = db.settings_salary.update_one(
+        {"settings_type": "salary_slip"},
+        {"$set": {
+            "company_info": DEFAULT_SALARY_SLIP_INFO,
+            "last_updated": datetime.now()
+        }}
+    )
+    
+    if result.modified_count == 0 and result.matched_count == 0:
+        return format_response(False, "Failed to restore default salary slip settings", status=500)
+    
+    # Get updated settings
+    updated = db.settings_salary.find_one({"settings_type": "salary_slip"})
+    updated["_id"] = str(updated["_id"])
+    
+    return format_response(True, "Default salary slip settings restored", data=updated)
+
+
 # Utility functions for invoice modules to access settings
 def get_current_settings(invoice_type):
     """Get current settings for invoice generation"""
@@ -217,3 +325,11 @@ def get_current_settings(invoice_type):
     if settings:
         return settings.get("editable_fields", {})
     return {}
+
+
+def get_current_salary_settings():
+    """Get current settings for salary slip generation"""
+    settings = get_or_create_salary_settings()
+    if settings:
+        return settings.get("company_info", DEFAULT_SALARY_SLIP_INFO)
+    return DEFAULT_SALARY_SLIP_INFO

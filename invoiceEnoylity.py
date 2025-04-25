@@ -275,18 +275,37 @@ def get_next_invoice_number():
 def generate_invoice_route():
     try:
         data = request.get_json() or {}
-        for field in ['invoice_date', 'client_name', 'client_address']:
-            if field not in data:
-                return format_response(False, f"Missing required field: {field}", status=400)
 
-        # assign number & dates
+        # ✅ Required fields with custom messages
+        required_fields = {
+            'invoice_date':    "Invoice date is required.",
+            'due_date':        "Due date is required.",
+            'client_name':     "Client name is required.",
+            'client_address':  "Client address is required."
+        }
+
+        for field, error_msg in required_fields.items():
+            if not data.get(field):
+                return format_response(False, error_msg, status=400)
+
+        # ✅ Validate and format dates
+        try:
+            inv_date = datetime.datetime.strptime(data['invoice_date'], '%d-%m-%Y')
+            due_date = datetime.datetime.strptime(data['due_date'], '%d-%m-%Y')
+        except ValueError:
+            return format_response(False, "Invalid date format. Use DD-MM-YYYY", status=400)
+
+        # ✅ Optional phone validation
+        client_phone = data.get('client_phone')
+        if client_phone:
+            if not client_phone.isdigit() or len(client_phone) != 10:
+                return format_response(False, "Client phone must be exactly 10 digits if provided", status=400)
+
+        # ✅ Assign invoice number
         data['invoice_number'] = get_next_invoice_number()
-        inv_date = datetime.datetime.strptime(data['invoice_date'], '%d-%m-%Y')
-        due = inv_date + datetime.timedelta(days=7)
-        data['due_date'] = due.strftime('%d-%m-%Y')
 
-        # items & totals
-        items = data['items']
+        # ✅ Item calculations
+        items = data.get('items', [])
         subtotal = sum(i['quantity'] * i['price'] for i in items)
         data['subtotal'] = subtotal
         pm = int(data.get('payment_method', 0))
@@ -295,12 +314,12 @@ def generate_invoice_route():
         data['total'] = subtotal + paypal_fee
         data['payment_method_text'] = {0: "PayPal", 1: "Bank Transfer"}.get(pm, "Other")
 
+        # ✅ Format address
         data['client_address'] = data['client_address'].replace(', ', '\n')
 
-        # dynamic settings merge
+        # ✅ Merge settings
         settings = get_current_settings("Enoylity Studio") or {}
 
-        # 1) Define your defaults for the company info
         company_defaults = {
             'company_name':    DEFAULT_SETTINGS['company_name'],
             'company_tagline': DEFAULT_SETTINGS['company_tagline'],
@@ -309,31 +328,28 @@ def generate_invoice_route():
             'company_phone':   DEFAULT_SETTINGS['company_phone'],
             'website':         DEFAULT_SETTINGS['website'],
         }
-
-        # 2) Overlay (merge) any fields from settings['company_info']
-        #    so missing keys fall back to company_defaults.
         raw = settings.get('company_info', {}) or {}
         company_info = {**company_defaults, **raw}
 
-        # 3) Do the same for bank details
         bank_defaults = DEFAULT_SETTINGS['bank_details']
-        raw_bank    = settings.get('bank_details', {}) or {}
+        raw_bank = settings.get('bank_details', {}) or {}
         bank_details = {**bank_defaults, **raw_bank}
 
-        # 4) Finally build your invoice_data
         invoice_data = {
             **company_info,
             'bank_details': bank_details,
             **data
         }
 
+        # ✅ Generate PDF
         pdf_bytes = create_invoice(invoice_data)
 
-        # persist & respond
+        # ✅ Save to DB
         record = invoice_data.copy()
         record['created_at'] = datetime.datetime.now()
         db.invoiceEnoylity.insert_one(record)
 
+        # ✅ Send file
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
         return send_file(
@@ -342,8 +358,9 @@ def generate_invoice_route():
             as_attachment=True,
             download_name=f"invoice_{data['invoice_number']}.pdf"
         )
+
     except ValueError:
-        return format_response(False, "Invalid date format for 'invoice_date'. Use DD-MM-YYYY", status=400)
+        return format_response(False, "Invalid date format. Use DD-MM-YYYY", status=400)
     except Exception as e:
         print(f"Error generating invoice: {e}")
         return format_response(False, "Internal server error", status=500)

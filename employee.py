@@ -171,20 +171,20 @@ def get_salary_slip():
     incoming_map = {item['name']: float(item.get('amount', 0)) for item in data.get('salary_structure', [])}
     allowance_names = [
         "Basic Pay", "House Rent Allowance",
-        "Performance Bonas", "Overtime Bonas", "Special Allowance"
+        "Performance Bonus", "Overtime Bonus", "Special Allowance"
     ]
     final = []
 
     # calculate basic amount once
-    basic_amt = float(emp.get('base_salary', 0)) / 2
+    basic_amt = float(emp.get('base_salary', 0)) * 0.7
 
     for name in allowance_names:
         if name == "Basic Pay":
             amt = basic_amt
         elif name == "House Rent Allowance":
-            amt = basic_amt * 0.60   # 60% of basic pay
+            amt = float(emp.get('base_salary', 0)) * 0.2   # 40% of basic pay
         elif name == "Special Allowance":
-            amt = basic_amt * 0.40   # 60% of basic pay
+            amt = float(emp.get('base_salary', 0)) * 0.1   # 20% of basic pay
         else:
             amt = incoming_map.get(name, 0.0)
         final.append({"name": name, "amount": amt})
@@ -233,7 +233,14 @@ def get_payslips():
     cursor = db.payslips.find(query, {'_id': 0}).skip((page-1)*size).limit(size)
     payslips = [{**p, 'download_link': f"/download/{p['payslipId']}"} for p in cursor]
     if not payslips:
-        abort(404)
+        return format_response(True, "No payslips found", {
+            'payslips': [],
+            'pagination': {
+                'totalRecords': 0,
+                'currentPage': page,
+                'totalPages': 0
+            }
+        }, status=200)
     return format_response(True, "Payslips retrieved successfully", {
         'payslips': payslips,
         'pagination': { 'totalRecords': total, 'currentPage': page, 'totalPages': math.ceil(total/size) }
@@ -241,24 +248,32 @@ def get_payslips():
 
 @employee_bp.route('/viewpdf/<payslip_id>', methods=['GET'])
 def view_payslip_pdf(payslip_id):
-    # Look up the payslip record
+    # Fetch payslip data
     payslip = db.payslips.find_one({"payslipId": payslip_id})
     if not payslip:
-        abort(404)
+        return format_response(False, "Payslip not found", status=404)
 
-    # Build full file path
-    file_path = os.path.join('path/to/salary/slips', payslip['filename'])
-    if not os.path.exists(file_path):
-        return format_response(False, "Payslip PDF file not found", status=404)
+    # Get the snapshot and generation date
+    emp_snapshot = payslip.get('emp_snapshot')
+    if not emp_snapshot:
+        return format_response(False, "Payslip does not contain employee snapshot", status=400)
 
-    # Send PDF inline
+    # Format date string for PDF
+    generated_on = payslip.get('generated_on')
+    if not generated_on:
+        return format_response(False, "Payslip does not have generation date", status=400)
+    generated_on_str = generated_on.strftime("%d-%m-%Y")
+
+    # Generate the PDF using existing logic
+    pdf_buf = SalarySlipGenerator(emp_snapshot, current_date=generated_on_str).generate_pdf()
+
+    # Return PDF as inline display
     response = make_response(send_file(
-        file_path,
+        pdf_buf,
         mimetype='application/pdf',
-        as_attachment=False      # <-- inline, not download
+        as_attachment=False
     ))
-    # Explicitly set disposition to inline
     response.headers['Content-Disposition'] = (
-        f'inline; filename="{payslip["filename"]}"'
+        f'inline; filename="{payslip.get("filename", "salary_slip.pdf")}"'
     )
     return response

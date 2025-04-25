@@ -100,16 +100,28 @@ def generate_invoice_endpoint():
 
         # 4️⃣ Validate payload
         data = request.get_json() or {}
-        required = ("bill_to_name", "bill_to_address", "bill_to_city",
-                    "bill_to_email", "invoice_date", "due_date", "notes")
-        for field in required:
-            if field not in data:
-                return format_response(False, f"Missing required field: {field}", status=400)
+        phone = data.get('bill_to_phone')
+        if phone:
+            if not phone.isdigit() or len(phone) != 10:
+                return format_response(False, "Phone number must be exactly 10 digits if provided", status=400)
+        
+        required_fields = {
+            "bill_to_name":     "Billing name is required",
+            "bill_to_address":  "Billing address is required",
+            "bill_to_email":    "Billing email is required",
+            "invoice_date":     "Invoice date is required",
+            "due_date":         "Due date is required"
+        }
+
+        for field, error_msg in required_fields.items():
+            if not data.get(field):
+                return format_response(False, error_msg, status=400)
+
 
         # 5️⃣ Parse fields
         bt_name = data['bill_to_name']
         bt_addr = data['bill_to_address']
-        bt_city = data['bill_to_city']
+        bt_phone = data['bill_to_phone']
         bt_mail = data['bill_to_email']
         note    = data['notes']
         items   = data.get('items', [])
@@ -131,7 +143,7 @@ def generate_invoice_endpoint():
         pdf.add_page()
 
         # Bill To block
-        lines = ["Bill To:"] + [bt_name, bt_addr, bt_city, bt_mail]
+        lines = ["Bill To:"] + [bt_name, bt_addr, bt_phone, bt_mail]
         heights = [8] + [6]*(len(lines)-1)
         block_w = pdf.w - pdf.l_margin - pdf.r_margin
         x, y = pdf.get_x(), pdf.get_y()
@@ -218,7 +230,7 @@ def generate_invoice_endpoint():
             'bill_to': {
                 'name': bt_name,
                 'address': bt_addr,
-                'city': bt_city,
+                'phone': bt_phone,
                 'email': bt_mail
             },
             'items': items,

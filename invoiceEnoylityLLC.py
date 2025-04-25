@@ -104,17 +104,26 @@ def generate_invoice_endpoint():
 
         # 3️⃣ Parse & validate input
         data = request.get_json() or {}
-        required = [
-            'bill_to_name', 'bill_to_address', 'bill_to_city',
-            'bill_to_email', 'invoice_date', 'due_date', 'note'
-        ]
-        for field in required:
-            if field not in data:
-                return format_response(False, f"Missing required field: {field}"), 400
+        phone = data.get('bill_to_phone')
+        if phone:
+            if not phone.isdigit() or len(phone) != 10:
+                return format_response(False, "Phone number must be exactly 10 digits if provided", status=400)
+        
+        required_fields = {
+            "bill_to_name":     "Billing name is required",
+            "bill_to_address":  "Billing address is required",
+            "bill_to_email":    "Billing email is required",
+            "invoice_date":     "Invoice date is required",
+            "due_date":         "Due date is required"
+        }
+
+        for field, error_msg in required_fields.items():
+            if not data.get(field):
+                return format_response(False, error_msg, status=400)
 
         bt_name = data['bill_to_name']
         bt_addr = data['bill_to_address']
-        bt_city = data['bill_to_city']
+        bt_phone = data['bill_to_phone']
         bt_mail = data['bill_to_email']
         note    = data['note']
         items   = data.get('items', [])
@@ -138,7 +147,7 @@ def generate_invoice_endpoint():
         pdf.add_page()
 
         # — Bill To block
-        lines = [bt_name, bt_addr, bt_city, bt_mail]
+        lines = [bt_name, bt_addr, bt_phone, bt_mail]
         x, y = pdf.l_margin, pdf.get_y()
         width = pdf.w - pdf.l_margin - pdf.r_margin
         indent, padding = 4, 6
@@ -226,7 +235,7 @@ def generate_invoice_endpoint():
             'invoice_number':    inv_num,
             'invoice_date':      invoice_date,
             'due_date':          due_date,
-            'bill_to': { 'name': bt_name, 'address': bt_addr, 'city': bt_city, 'email': bt_mail },
+            'bill_to': { 'name': bt_name, 'address': bt_addr, 'city': bt_phone, 'email': bt_mail },
             'items':             items,
             'payment_method':    payment_method,
             'subtotal':          subtotal,

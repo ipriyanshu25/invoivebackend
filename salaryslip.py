@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file,Blueprint
+from flask import Flask, request, jsonify, send_file, Blueprint
 import datetime
 import calendar
 import re
@@ -12,14 +12,20 @@ from utils import format_response
 # Import standard FPDF without extensions
 from fpdf import FPDF
 
-salary_bp = Blueprint("salaryslip",__name__,url_prefix="/salary")
+# Import the settings utility function
+from settings import get_current_salary_settings
+
+salary_bp = Blueprint("salaryslip", __name__, url_prefix="/salary")
 
 class ImprovedSalarySlipPDF(FPDF):
     """An improved PDF class for better-looking salary slips"""
-    def __init__(self):
+    def __init__(self, company_info=None):
         # Use portrait mode (P), mm as units, A4 format
         super().__init__(orientation='P', unit='mm', format='A4')
-
+        
+        # Store company info
+        self.company_info = company_info or {}
+        
         # ─── Register Lexend fonts ───────────────────────────────────────────────
         # Make sure you have placed Lexend-Regular.ttf and Lexend-Bold.ttf under static/fonts/
         self.add_font('Lexend', '', os.path.join('static', 'Lexend-Regular.ttf'), uni=True)
@@ -52,10 +58,12 @@ class ImprovedSalarySlipPDF(FPDF):
             self.logo_path = local_logo
 
     def header(self):
-        # Company name
+        # Company name from settings - Use company_title if available, otherwise fallback
+        company_title = self.company_info.get('company_title', 'ENOYLITY MEDIA CREATIONS')
+        
         self.set_font('Lexend', 'B', 18)
         self.set_text_color(*self.primary_color)
-        self.cell(110, 10, 'ENOYLITY MEDIA CREATIONS ', 0, 0, 'L')
+        self.cell(110, 10, company_title, 0, 0, 'L')
 
         # Logo (if we have one) at top‑right
         if self.logo_path:
@@ -63,23 +71,28 @@ class ImprovedSalarySlipPDF(FPDF):
             x_pos = self.w - self.right_margin - logo_w
             self.image(self.logo_path, x=x_pos, y=10, w=logo_w)
 
-        # Rest of your header (line, address, etc.)
+        # Rest of your header (line, address, etc.) - using settings data
         self.ln(15)
         self.set_draw_color(*self.primary_color)
         self.set_line_width(0.5)
         self.line(self.left_margin, self.get_y(), self.w - self.right_margin, self.get_y())
         self.ln(3)
+        
+        # Get company details from settings
+        company_name = self.company_info.get('company_name', 'Enoylity Media Creations Private Limited')
+        address_line1 = self.company_info.get('address_line1', 'Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square')
+        address_line2 = self.company_info.get('address_line2', 'Nari Road, Nagpur, Maharashtra, India 440026')
+        
         self.set_font('Lexend', 'B', 11)
         self.set_text_color(*self.secondary_color)
-        self.cell(180, 5, 'Enoylity Media Creations Private Limited', 0, 1, 'L')
+        self.cell(180, 5, company_name, 0, 1, 'L')
         self.ln(1)
         self.set_font('Lexend', '', 9)
         self.set_text_color(*self.secondary_color)
-        self.cell(180, 5, 'Ekam Enclave II, 301A, Ramai Nagar, near Kapil Nagar Square', 0, 1, 'L')
-        self.cell(180, 5, 'Nari Road, Nagpur, Maharashtra, India 440026', 0, 1, 'L')
+        self.cell(180, 5, address_line1, 0, 1, 'L')
+        self.cell(180, 5, address_line2, 0, 1, 'L')
         self.ln(2)
 
- 
     def footer(self):
         self.set_y(-15)
         self.set_font('Lexend', '', 8)
@@ -202,15 +215,6 @@ class ImprovedSalarySlipPDF(FPDF):
 
         self.ln(5)
         
-        # # Add Annual Income row
-        # self.set_font('Lexend', 'B', 10)
-        # self.set_text_color(*self.secondary_color)
-        # self.cell(left_col_width, 6, 'Annual Income:', 0, 0)
-        # self.set_font('Lexend', '', 10)
-        # self.set_text_color(0, 0, 0)
-        # # Safely convert gross earnings to float
-        # self.cell(data_col_width, 6, data['salary_details']['annual_income'], 0, 1)
-        
         # Calculate usable width for the table
         table_width = self.w - self.left_margin - self.right_margin - 4  # -4 for 2mm margin on each side
         
@@ -304,42 +308,11 @@ class ImprovedSalarySlipPDF(FPDF):
         # Net payable with better highlighting
         self.ln(3)
         
-        # # Add Tax Summary section
-        # self.set_font('Lexend', 'B', 11)
-        # self.set_text_color(*self.primary_color)
-        # self.cell(0, 8, 'TAX SUMMARY', 0, 1, 'L')
-        
-        # self.set_font('Lexend', '', 10)
-        # self.set_text_color(0, 0, 0)
-        # self.cell(left_col_width, 7, 'Annual Tax:', 0, 0)
-        # # Use safe_float to handle the annual tax value
-        # annual_tax_value = self.safe_float(data['tax_details'].get('annual_tax', total_deductions_amount * 12))
-        # annual_tax = f"Rs. {annual_tax_value:.2f}"
-        # self.cell(60, 7, annual_tax, 0, 1)
-        
-        # self.cell(left_col_width, 7, 'Cess (4%):', 0, 0)
-        # # Use safe_float to handle the cess value
-        # cess_value = self.safe_float(data['tax_details'].get('cess', 0))
-        # cess = f"Rs. {cess_value:.2f}" if cess_value > 0 else 'N/A'
-        # self.cell(60, 7, cess, 0, 1)
-        
-        # self.cell(left_col_width, 7, 'Monthly Tax:', 0, 0)
-        # monthly_tax = f"Rs. {total_deductions_amount:.2f}"
-        # self.cell(60, 7, monthly_tax, 0, 1)
-        
-        # self.ln(3)
-        
         # Net Monthly Salary
         self.set_font('Lexend', 'B', 11)
         self.set_text_color(*self.primary_color)
         self.cell(120, 8, 'Net Monthly Salary', 0, 0)
         self.cell(60, 8, f"Rs. {net_payable:.2f}", 0, 1, 'R')
-        
-        # # Net Annual Salary
-        # self.set_font('Lexend', 'B', 11)
-        # self.set_text_color(*self.primary_color)
-        # self.cell(120, 8, 'Net Annual Salary', 0, 0)
-        # self.cell(60, 8, f"Rs. {annual_net_payable:.2f}", 0, 1, 'R')
         
         # Amount in words
         self.set_font('Lexend', '', 9)
@@ -375,6 +348,9 @@ class SalarySlipGenerator:
         self.employee_data = employee_data
         self.salary_details = {}
         self.tax_details = {}
+        
+        # Fetch company settings from database
+        self.company_settings = get_current_salary_settings()
         
         # Set current date
         if current_date:
@@ -483,7 +459,11 @@ class SalarySlipGenerator:
         lop_days         = self.employee_data.get('lop', 0)  # can be 1, 0.5, etc.
 
         # 2) Compute gross monthly salary (sum of all full components)
-        gross_monthly = sum(item['amount'] for item in salary_structure)
+        allowed_components = {'Basic Pay', 'House Rent Allowance', 'Performance Bonus', 'Overtime Bonus', 'Special Allowance'}
+        gross_monthly = sum(
+            item['amount'] for item in salary_structure 
+            if item['name'] in allowed_components
+        )
 
         # 3) Find exact per-day rate (handles half-days automatically)
         per_day = gross_monthly / total_days
@@ -496,13 +476,14 @@ class SalarySlipGenerator:
         earnings = []
         for item in salary_structure:
             name = item['name']
+            if name not in allowed_components:
+                continue  # Skip irrelevant components
             if name == 'Special Allowance':
-                # subtract the exact LOP deduction here
                 amt = max(0.0, item['amount'] - lop_deduction)
             else:
                 amt = item['amount']
             earnings.append({
-                'name':   name,
+                'name': name,
                 'amount': f"Rs. {amt:.2f}"
             })
 
@@ -555,6 +536,9 @@ class SalarySlipGenerator:
         slip_date = self.current_date.strftime('%d-%m-%Y')
         month_name = self.current_date.strftime('%B')
         
+        # Use company name from settings if available
+        company_name = self.company_settings.get('company_name', 'Enoylity Media Creations')
+        
         # Prepare result dictionary
         result = {
             "employee_details": {
@@ -567,13 +551,13 @@ class SalarySlipGenerator:
                 "pan": self.employee_data.get('pan', ''),
                 "working_days": self.employee_data['working_days'],
                 "lop": self.employee_data.get('lop', 0),
-                "month_salary":self.employee_data.get('monthly_salary')
+                "month_salary": self.employee_data.get('monthly_salary')
             },
             "salary_details": self.salary_details,
             "tax_details": self.tax_details,
             "pay_period": f"{month_name} {self.employee_data['current_year']}",
             "generated_on": slip_date,
-            "company_name": self.employee_data.get('company_name', 'Enoylity Media Creations'),
+            "company_name": company_name,
             "tax_notes": tax_notes
         }
         
@@ -583,8 +567,8 @@ class SalarySlipGenerator:
         """Generate PDF salary slip"""
         salary_data = self.generate_salary_data()
         
-        # Use our improved PDF class
-        pdf = ImprovedSalarySlipPDF()
+        # Use our improved PDF class with company settings
+        pdf = ImprovedSalarySlipPDF(company_info=self.company_settings)
         pdf.create_salary_slip(salary_data)
         
         # Save PDF to a bytes buffer
@@ -594,6 +578,7 @@ class SalarySlipGenerator:
         pdf_buffer.seek(0)
         
         return pdf_buffer
+
 
 # Routes remain the same...
 @salary_bp.route('/upload-logo', methods=['POST'])
