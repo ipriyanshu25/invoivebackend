@@ -31,40 +31,57 @@ def generate_unique_id():
     return ''.join(random.choices(string.digits, k=16))
 
 def extract_company_info(module_name):
-    """Extract company info from the specified invoice module"""
     try:
         module = importlib.import_module(module_name)
-        
-        # Handle different structure based on module
+        default_settings = getattr(module, "DEFAULT_SETTINGS", {})
+
         if module_name == "invoiceMHD":
-            # MHD Tech
-            return {"company_info": module.DEFAULT_SETTINGS.get("company_info", {})}
-        
-        elif module_name == "invoiceEnoylity":
-            # Enoylity Studio
-            company_details = module.COMPANY_DETAILS
+            # pull company_info, paypal_details and bank_details
+            company_info   = default_settings.get("company_info", {})
+            paypal_details = default_settings.get("paypal_details", {})
+            bank_details   = default_settings.get("bank_details", {})
             return {
-                "company_info": {
-                    "name": company_details.get("company_name", ""),
-                    "tagline": company_details.get("company_tagline", ""),
-                    "address": company_details.get("company_address", ""),
-                    "email": company_details.get("company_email", ""),
-                    "phone": company_details.get("company_phone", ""),
-                    "website": company_details.get("website", "")
-                },
-                "bank_details": company_details.get("bank_details", "")
+                "company_info":   company_info,
+                "paypal_details": paypal_details,
+                "bank_details":   bank_details
             }
-        
+
+        elif module_name == "invoiceEnoylity":
+            company_info = {
+                "name":    default_settings.get("company_name", ""),
+                "tagline": default_settings.get("company_tagline", ""),
+                "address": default_settings.get("company_address", ""),
+                "email":   default_settings.get("company_email", ""),
+                "phone":   default_settings.get("company_phone", ""),
+                "website": default_settings.get("website", "")
+            }
+            bank_details = default_settings.get("bank_details", {})
+            return {
+                "company_info":   company_info,
+                "bank_details":   bank_details
+            }
+
         elif module_name == "invoiceEnoylityLLC":
-            # Enoylity Tech
-            return {"company_info": module.DEFAULT_SETTINGS.get("company_info", {})}
-        
+            company_info   = default_settings.get("company_info", {})
+            paypal_details = default_settings.get("paypal_details", {})
+            bank_details   = default_settings.get("bank_details", {})
+            return {
+                "company_info":   company_info,
+                "paypal_details": paypal_details,
+                "bank_details":   bank_details
+            }
+
         return {}
-    
+
     except (ImportError, AttributeError) as e:
         print(f"Error extracting company info from {module_name}: {e}")
         return {}
 
+
+    except (ImportError, AttributeError) as e:
+        print(f"Error extracting company info from {module_name}: {e}")
+        return {}
+    
 def get_or_create_invoice_settings(invoice_type):
     """Get or create settings for an invoice type"""
     # Check if invoice type is valid
@@ -159,42 +176,37 @@ def get_invoice_settings():
 
 @settings_bp.route('/invoice', methods=['POST'])
 def update_invoice_settings():
-    """Update editable fields for a specific invoice settings document by settings_id"""
     data = request.get_json() or {}
 
-    # 1. Extract the settings_id from the body
     settings_id = data.get("settings_id")
     if not settings_id:
         return format_response(False, "No settings_id provided", status=400)
 
-    # 2. Load the existing settings doc
     settings = db.settings_invoice.find_one({"settings_id": settings_id})
     if not settings:
         return format_response(False, f"Settings with id '{settings_id}' not found", status=404)
 
-    # 3. Gather update data (everything except settings_id)
     update_data = {k: v for k, v in data.items() if k != "settings_id"}
     if not update_data:
         return format_response(False, "No update data provided", status=400)
 
     allowed_updates = {}
 
-    # 4. Merge in company_info if provided
     if "company_info" in update_data:
         existing = settings["editable_fields"].get("company_info", {})
         allowed_updates["editable_fields.company_info"] = {**existing, **update_data["company_info"]}
 
-    # 5. Overwrite bank_details if provided
     if "bank_details" in update_data and "bank_details" in settings["editable_fields"]:
         allowed_updates["editable_fields.bank_details"] = update_data["bank_details"]
+
+    if "paypal_details" in update_data and "paypal_details" in settings["editable_fields"]:
+        allowed_updates["editable_fields.paypal_details"] = update_data["paypal_details"]
 
     if not allowed_updates:
         return format_response(False, "No valid editable fields provided", status=400)
 
-    # 6. Stamp with current time
     allowed_updates["last_updated"] = datetime.now()
 
-    # 7. Persist changes
     updated = db.settings_invoice.find_one_and_update(
         {"settings_id": settings_id},
         {"$set": allowed_updates},
@@ -205,7 +217,6 @@ def update_invoice_settings():
 
     updated["_id"] = str(updated["_id"])
     return format_response(True, f"Settings {settings_id} updated", data=updated)
-
 
 @settings_bp.route('/restore', methods=['POST'])
 def restore_default_settings():

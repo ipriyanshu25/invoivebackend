@@ -452,71 +452,79 @@ class SalarySlipGenerator:
         
     
     def calculate_salary(self):
-        """Calculate salary based on LOP days deducted only from Special Allowance."""
+        """Calculate salary after LOP deductions and then compute gross salary correctly."""
         # 1) Pull in structure and dates
         salary_structure = self.employee_data['salary_structure']
-        total_days       = self.employee_data['total_days']
-        lop_days         = self.employee_data.get('lop', 0)  # can be 1, 0.5, etc.
+        total_days = self.employee_data['total_days']
+        lop_days = self.employee_data.get('lop', 0)  # can be 1, 0.5, etc.
 
-        # 2) Compute gross monthly salary (sum of all full components)
+        # 2) Define allowed components
         allowed_components = {'Basic Pay', 'House Rent Allowance', 'Performance Bonus', 'Overtime Bonus', 'Special Allowance'}
-        gross_monthly = sum(
-            item['amount'] for item in salary_structure 
-            if item['name'] in allowed_components
-        )
 
-        # 3) Find exact per-day rate (handles half-days automatically)
-        per_day = gross_monthly / total_days
-        lop_deduction = per_day * lop_days
-
-        # 4) For tax purposes, annual income is still based on full gross
-        self.annual_salary = gross_monthly * 12
-
-        # 5) Build the earnings lines: only Special Allowance is cut for LOP
+        # 3) Prepare adjusted earnings list
         earnings = []
+        adjusted_special_allowance = 0.0
+
         for item in salary_structure:
             name = item['name']
             if name not in allowed_components:
-                continue  # Skip irrelevant components
+                continue  # Skip other components
+
+            amount = item['amount']
+
             if name == 'Special Allowance':
-                amt = max(0.0, item['amount'] - lop_deduction)
-            else:
-                amt = item['amount']
+                # Calculate LOP deduction only on Special Allowance
+                per_day = amount / total_days
+                lop_deduction = per_day * lop_days
+                amount = max(0.0, amount - lop_deduction)
+                adjusted_special_allowance = amount  # Save adjusted Special Allowance
+
             earnings.append({
                 'name': name,
-                'amount': f"Rs. {amt:.2f}"
+                'amount': f"Rs. {amount:.2f}"
             })
 
-        # 6) Run your existing tax logic
-        tax_notes = self.calculate_tax()            # populates self.tax_details
+        # 4) Now, calculate gross_monthly after LOP adjustment
+        gross_monthly = sum(float(item['amount'].replace('Rs. ', '')) for item in earnings)
+
+        # 5) For tax purposes, annual income is based on **full gross without LOP deduction**
+        full_gross_monthly = sum(
+            item['amount'] for item in salary_structure
+            if item['name'] in allowed_components
+        )
+        self.annual_salary = full_gross_monthly * 12
+
+        # 6) Run existing tax logic
+        tax_notes = self.calculate_tax()  # populates self.tax_details
         monthly_tax = self.tax_details['monthly_tax']
 
-        # 7) Prepare the deductions list (only Income Tax/TDS here)
+        # 7) Prepare deductions (only Income Tax/TDS here)
         deductions = []
         if monthly_tax > 0:
             deductions.append({
-                'name':   'Income Tax (TDS)',
+                'name': 'Income Tax (TDS)',
                 'amount': f"Rs. {monthly_tax:.2f}"
             })
 
-        # 8) Totals: include LOP deduction + TDS
-        total_deductions_amount = lop_deduction + monthly_tax
+        # 8) Totals: TDS only (LOP already deducted inside earnings/gross)
+        total_deductions_amount = monthly_tax
         net_payable = gross_monthly - total_deductions_amount
         annual_net_payable = net_payable * 12
 
-        # 9) Store everything into salary_details for PDF rendering
+        # 9) Store everything for PDF rendering
         self.salary_details = {
-            'earnings':        earnings,
-            'deductions':      deductions,
-            'gross_earnings':  f"Rs. {gross_monthly:.2f}",
-            'total_deductions':f"Rs. {total_deductions_amount:.2f}",
-            'net_payable':     f"Rs. {net_payable:.2f}",
-            'annual_income':   f"Rs. {self.annual_salary:.2f}",
+            'earnings': earnings,
+            'deductions': deductions,
+            'gross_earnings': f"Rs. {gross_monthly:.2f}",
+            'total_deductions': f"Rs. {total_deductions_amount:.2f}",
+            'net_payable': f"Rs. {net_payable:.2f}",
+            'annual_income': f"Rs. {self.annual_salary:.2f}",
             'annual_net_payable': f"Rs. {annual_net_payable:.2f}",
             'amount_in_words': f"{num2words(int(net_payable), lang='en_IN').title()} Only"
         }
 
         return tax_notes
+
 
     
     def calculate_experience(self):

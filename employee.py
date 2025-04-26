@@ -153,10 +153,11 @@ def get_all_employees():
 @employee_bp.route('/salaryslip', methods=['POST'])
 def get_salary_slip():
     data = request.get_json(force=True)
-    emp_id = data.get('employee_id')
+    # Accept 'employeeId' submitted by user
+    emp_id = data.get('employeeId') or data.get('employee_id')
     payslip_month = data.get('month')
     if not emp_id or not payslip_month:
-        return format_response(False, "Missing required fields: employee_id or month", status=400)
+        return format_response(False, "Missing required fields: employeeId or month", status=400)
     try:
         month_date = datetime.strptime(payslip_month, "%m-%Y")
     except ValueError:
@@ -167,6 +168,7 @@ def get_salary_slip():
     year, month = month_date.year, month_date.month
     max_days = calendar.monthrange(year, month)[1]
     date_str = f"{max_days:02d}-{month:02d}-{year}"
+
     # Build salary structure
     incoming_map = {item['name']: float(item.get('amount', 0)) for item in data.get('salary_structure', [])}
     allowance_names = [
@@ -175,16 +177,14 @@ def get_salary_slip():
     ]
     final = []
 
-    # calculate basic amount once
     basic_amt = float(emp.get('base_salary', 0)) * 0.7
-
     for name in allowance_names:
         if name == "Basic Pay":
             amt = basic_amt
         elif name == "House Rent Allowance":
-            amt = float(emp.get('base_salary', 0)) * 0.2   # 40% of basic pay
+            amt = float(emp.get('base_salary', 0)) * 0.2
         elif name == "Special Allowance":
-            amt = float(emp.get('base_salary', 0)) * 0.1   # 20% of basic pay
+            amt = float(emp.get('base_salary', 0)) * 0.1
         else:
             amt = incoming_map.get(name, 0.0)
         final.append({"name": name, "amount": amt})
@@ -197,11 +197,10 @@ def get_salary_slip():
         "doj": datetime.strptime(emp['date_of_joining'], "%Y-%m-%d").strftime("%d-%m-%Y"),
         "bank_account": emp.get('bank_details', {}).get('account_number', ''),
         "pan": emp.get('pan_number'),
-        "monthly_salary":emp.get('annual_salary')/12,
+        "monthly_salary": emp.get('annual_salary')/12,
         "lop": float(data.get('lop', 0)),
         "salary_structure": final
     }
-    # Generate PDF
     pdf_buf = SalarySlipGenerator(emp_snapshot, current_date=date_str).generate_pdf()
     payslip_id = str(uuid.uuid4())
     db.payslips.insert_one({
@@ -248,26 +247,20 @@ def get_payslips():
 
 @employee_bp.route('/viewpdf/<payslip_id>', methods=['GET'])
 def view_payslip_pdf(payslip_id):
-    # Fetch payslip data
     payslip = db.payslips.find_one({"payslipId": payslip_id})
     if not payslip:
         return format_response(False, "Payslip not found", status=404)
 
-    # Get the snapshot and generation date
     emp_snapshot = payslip.get('emp_snapshot')
     if not emp_snapshot:
         return format_response(False, "Payslip does not contain employee snapshot", status=400)
 
-    # Format date string for PDF
     generated_on = payslip.get('generated_on')
     if not generated_on:
         return format_response(False, "Payslip does not have generation date", status=400)
     generated_on_str = generated_on.strftime("%d-%m-%Y")
 
-    # Generate the PDF using existing logic
     pdf_buf = SalarySlipGenerator(emp_snapshot, current_date=generated_on_str).generate_pdf()
-
-    # Return PDF as inline display
     response = make_response(send_file(
         pdf_buf,
         mimetype='application/pdf',

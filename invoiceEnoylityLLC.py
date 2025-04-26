@@ -10,6 +10,8 @@ from utils import format_response
 from db import db
 from settings import get_current_settings
 import copy
+from random import choices
+import string as _str
 
 # Configure logging
 logging.basicConfig(level=logging.ERROR)
@@ -39,8 +41,20 @@ DEFAULT_SETTINGS = {
         "phone":      "+15075561971",
         "youtube":    "youtube.com/@enoylitytech",
         "email":      "support@enoylity.com"
+    },
+    "paypal_details": {
+        "receiver_email": "support@enoylity.com",
+        "paypal_name":    "Enoylity Media Creation"
+    },
+    "bank_details": {
+        "account_name":        "Enoylity Media Creations LLC",
+        "account_number":      "200000523466",
+        "routing_number":      "064209588",
+        "bank_name":           "Thread Bank",
+        "bank_address":        "210 E Main St, Rogersville TN 37857"
     }
 }
+
 
 # Generate sequential invoice numbers
 def get_next_invoice_number():
@@ -137,7 +151,7 @@ def generate_invoice_endpoint():
             datetime.strptime(invoice_date, '%d-%m-%Y')
             datetime.strptime(due_date,   '%d-%m-%Y')
         except ValueError:
-            return format_response(False, "Dates must be DD-MM-YYYY"), 400
+            return format_response(False, "Dates must be DD-MM-YYYY", status=400)
 
         # 5️⃣ Generate PDF
         pdf = InvoicePDF(settings)
@@ -150,7 +164,7 @@ def generate_invoice_endpoint():
         lines = [bt_name, bt_addr, bt_phone, bt_mail]
         x, y = pdf.l_margin, pdf.get_y()
         width = pdf.w - pdf.l_margin - pdf.r_margin
-        indent, padding = 4, 6
+        indent, padding = 4, 7
         header_h, line_h = 13, 7
         block_h = header_h + len(lines)*line_h + padding
         pdf.set_fill_color(*settings['colors']['light_pink'])
@@ -211,37 +225,110 @@ def generate_invoice_endpoint():
             fee = round(subtotal * 0.055,2)
             total = subtotal + fee
             pdf.ln(4)
-            pdf.set_font('Lexend','',11)
+            pdf.set_font('Lexend','',13)
             pdf.cell(140,8,'PayPal Fee',0,0,'R')
-            pdf.cell(45,8,f'${fee:.2f}',0,1,'R')
+            pdf.cell(45,8,f'${fee:.2f}',0,1,'C')
         else:
             total = subtotal
         pdf.ln(8)
         pdf.set_font('Lexend','B',14)
-        pdf.cell(141,10,'TOTAL',0,0,'R')
-        pdf.cell(45,10,f'USD ${total:.2f}',0,1,'R')
-        pdf.ln(10)
+        pdf.cell(135,7,'TOTAL',0,0,'R')
+        pdf.cell(39,8,f'USD ${total:.2f}',0,1,'C')
 
-        # — Notes
-        pdf.set_font('Lexend','',12)
-        pdf.multi_cell(0,6,'Note: '+ note)
+        # — Payment Info & Note side-by-side
+        pdf.ln(15)
+
+        x = pdf.l_margin
+        y = pdf.get_y()
+        width = pdf.w - pdf.l_margin - pdf.r_margin
+
+        # Split into left and right columns
+        left_col_width = width / 2 - 5
+        right_col_width = width / 2 - 5
+
+        # Remove background color — skip rect or draw without fill ('D' for border only if needed)
+
+        # Add a border only if you want, otherwise comment the next line:
+        # pdf.rect(x, y, left_col_width, 40, 'D')  # 'D' means only border (Draw)
+
+        pdf.set_xy(x, y+7)  # Added padding of 6 units
+
+        pdf.set_font('Lexend', 'B', 12)
+        pdf.set_text_color(*settings['colors']['black'])
+
+        if payment_method == 0:
+            # PayPal
+            paypal = settings['paypal_details']
+            pdf.cell(left_col_width-12, 6, 'PayPal Details:', ln=1)  # Adjusted width because of padding
+            pdf.set_font('Lexend', '', 11)
+            pdf.cell(left_col_width-12, 6, f"Receiver: {paypal['receiver_email']}", ln=1)
+            pdf.cell(left_col_width-12, 6, f"PayPal Name: {paypal['paypal_name']}", ln=1)
+        elif payment_method == 1:
+            # Bank
+            bank = settings['bank_details']
+            pdf.cell(left_col_width-12, 6, 'Bank Details:', ln=1)
+            pdf.set_font('Lexend', '', 11)
+            pdf.cell(left_col_width-12, 6, f"Account Name: {bank['account_name']}", ln=1)
+            pdf.cell(left_col_width-12, 6, f"Account No: {bank['account_number']}", ln=1)
+            pdf.cell(left_col_width-12, 6, f"Routing No: {bank['routing_number']}", ln=1)
+            pdf.cell(left_col_width-12, 6, f"Bank: {bank['bank_name']}", ln=1)
+            pdf.cell(left_col_width-12, 6, f"Address: {bank['bank_address']}", ln=1)
+        else:
+            # No Payment Info
+            pdf.cell(left_col_width-12, 6, 'Payment Method: N/A', ln=1)
+
+        # Note Right
+        pdf.set_xy(x + left_col_width + 10, y)
+        # Again, no background fill
+        # pdf.rect(x + left_col_width + 10, y, right_col_width, 40, 'D')  # Optional border
+
+        pdf.set_xy(x + left_col_width + 16, y + 6)  # Padding on right side too
+
+        pdf.set_font('Lexend', 'B', 12)
+        pdf.cell(right_col_width-12, 6, 'Note:', ln=1)
+
+        pdf.set_font('Lexend', '', 11)
+
+        # Save the current X and Y to manually control text position
+        start_x = x + left_col_width + 16
+        start_y = y + 12
+
+        pdf.set_xy(start_x, start_y)
+
+        # Now split the note into lines manually
+        lines = note.split('\n')
+        for line in lines:
+            pdf.set_x(start_x)
+            pdf.cell(right_col_width-20, 10, line, ln=1)
+
+
 
         # 6️⃣ Persist invoice record
-        from random import choices
-        import string as _str
         inv_id = ''.join(choices(_str.digits, k=16))
         record = {
             'invoiceenoylityId': inv_id,
             'invoice_number':    inv_num,
             'invoice_date':      invoice_date,
             'due_date':          due_date,
-            'bill_to': { 'name': bt_name, 'address': bt_addr, 'city': bt_phone, 'email': bt_mail },
+            'bill_to': {
+                'name':    bt_name,
+                'address': bt_addr,
+                'bt_phone': bt_phone,
+                'email':   bt_mail
+            },
             'items':             items,
             'payment_method':    payment_method,
             'subtotal':          subtotal,
             'total':             total,
             'created_at':        datetime.utcnow()
         }
+
+        # Add payment details if selected
+        if payment_method == 0:
+            record['payment_info'] = settings['paypal_details']
+        elif payment_method == 1:
+            record['payment_info'] = settings['bank_details']
+
         db.invoiceEnoylityLLC.insert_one(record)
 
         # 7️⃣ Stream PDF
@@ -251,10 +338,10 @@ def generate_invoice_endpoint():
                          download_name=f"invoice_{inv_num}.pdf")
 
     except KeyError as ke:
-        return format_response(False, f"Missing field: {ke}"), 400
+        return format_response(False, f"Missing field: {ke}", status=400)
     except Exception:
         logging.exception("Error generating invoice for Enoylity")
-        return format_response(False, "Internal server error"), 500
+        return format_response(False, "Internal server error", status=500)
     
 
 @enoylity_bp.route('/getlist', methods=['POST'])
