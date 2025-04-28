@@ -77,13 +77,6 @@ class InvoicePDF(FPDF):
         self.cell(0, 6, ci.get('youtube', ''), ln=1)
         self.cell(0, 6, ci['email'], ln=1)
         self.ln(12)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Lexend', '', 8)
-        self.set_text_color(100, 100, 100)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
 # Invoice number generator
 def get_next_invoice_number():
     counter = db.invoice_counters.find_one_and_update(
@@ -137,8 +130,9 @@ def generate_invoice_endpoint():
         bt_mail = data['bill_to_email']
         bt_phone = data['bill_to_phone']
         note    = data['notes']
+        bank_note = data['bank_Note']
         items   = data.get('items', [])
-        payment_method = int(data.get('payment_method', 0))
+        payment_method = int(data.get('payment_method', None))
 
         inv_no = get_next_invoice_number()
         # Validate dates
@@ -209,24 +203,24 @@ def generate_invoice_endpoint():
             amt  = rate * qty
             subtotal += amt
             pdf.cell(90,8,desc,0,0,'L')
-            pdf.cell(30,8,f'${rate:.2f}',0,0,'C')
+            pdf.cell(30,8,f'$ {rate:.2f}',0,0,'C')
             pdf.cell(20,8,str(qty),0,0,'C')
-            pdf.cell(45,8,f'${amt:.2f}',0,1,'C')
+            pdf.cell(45,8,f'$ {amt:.2f}',0,1,'C')
 
         # PayPal fee if applicable
         if payment_method == 0:
-            fee = round(subtotal * 0.055,2)
+            fee = subtotal * 0.056
             total = subtotal + fee
             pdf.ln(4)
             pdf.set_font('Lexend','',13)
             pdf.cell(140,8,'PayPal Fee',0,0,'R')
-            pdf.cell(45,8,f'${fee:.2f}',0,1,'C')
+            pdf.cell(45,8,f'$ {fee:.2f}',0,1,'C')
         else:
             total = subtotal
         pdf.ln(8)
         pdf.set_font('Lexend','B',14)
-        pdf.cell(135,7,'TOTAL',0,0,'R')
-        pdf.cell(39,8,f'USD ${total:.2f}',0,1,'C')
+        pdf.cell(135,8,'TOTAL ',0,0,'R')
+        pdf.cell(39,8,f'USD $ {total:.2f}',0,1,'C')
 
         pdf.ln(12)
 
@@ -244,9 +238,18 @@ def generate_invoice_endpoint():
             pdf.cell(left_w, 6, 'PayPal Details:', 0)
             
             # Right column: Notes heading (on the same line as PayPal Details) - moved further right
-            pdf.set_xy(pdf.l_margin + left_w + 20, y0)  # Added 20 points of space
-            pdf.cell(note_w, 6, 'Note:', 0, 1)
-            
+            if note:
+                pdf.set_xy(pdf.l_margin + left_w + 20, y0)
+                pdf.cell(note_w, 6, 'Note:', 0, 1)
+
+                # Content under “Note:”
+                pdf.set_xy(pdf.l_margin + left_w + 20, y0 + 6)
+                pdf.set_font('Lexend', '', 11)
+                pdf.multi_cell(note_w, 5, note, 0)
+
+
+
+                
             # Continue with PayPal details
             pdf.set_xy(pdf.l_margin, y0 + 6)
             pd = settings['paypal_details']
@@ -258,9 +261,15 @@ def generate_invoice_endpoint():
             pdf.cell(left_w, 6, 'Bank Details:', 0)
             
             # Right column: Notes heading (on the same line as Bank Details) - moved further right
-            pdf.set_xy(pdf.l_margin + left_w + 20, y0)  # Added 20 points of space
-            pdf.cell(note_w, 6, 'Note:', 0, 1)
-            
+            if note:
+                pdf.set_xy(pdf.l_margin + left_w + 20, y0)
+                pdf.cell(note_w, 6, 'Note:', 0, 1)
+
+                # Content under “Note:”
+                pdf.set_xy(pdf.l_margin + left_w + 20, y0 + 6)
+                pdf.set_font('Lexend', '', 11)
+                pdf.multi_cell(note_w, 5, note, 0)
+
             # Continue with Bank details
             pdf.set_xy(pdf.l_margin, y0 + 6)
             bd = settings['bank_details']
@@ -271,16 +280,32 @@ def generate_invoice_endpoint():
             pdf.cell(left_w, 5, f"Bank Name     : {bd.get('bank_name','')}", ln=1)
             pdf.cell(left_w, 5, f"Bank Address  : {bd.get('bank_address','')}", ln=1)
 
-        # Notes content - positioned at right column, under "Note:" heading
-        notes_x = pdf.l_margin + left_w + 20  # Added 20 points of space
-        notes_y = y0 + 6  # Start notes content below the heading
-        pdf.set_xy(notes_x, notes_y)
-        pdf.set_font('Lexend', '', 11)
-        pdf.multi_cell(note_w, 5, note, 0)  # Default left alignment  
 
 
+            if bank_note:
+                # move down a bit below bank details
+                start_y = pdf.get_y() + 6
+                pdf.set_xy(pdf.l_margin, start_y)
 
+                # Bank Note heading
+                pdf.set_font('Lexend', 'B', 11)
+                pdf.cell(note_w, 6, 'Bank Note:', 0, 1)
 
+                # Bank Note content
+                pdf.set_font('Lexend', '', 11)
+                pdf.multi_cell(note_w, 5, bank_note, 0)
+
+        else:
+            if note:
+                pdf.set_xy(pdf.l_margin, y0)
+                pdf.cell(note_w, 6, 'Note:', 0, 1)
+                # Notes content - positioned at right column, under "Note:" heading
+                notes_x = pdf.l_margin  # Added 20 points of space
+                notes_y = y0 + 6  # Start notes content below the heading
+                pdf.set_xy(notes_x, notes_y)
+                pdf.set_font('Lexend', '', 11)
+                pdf.multi_cell(note_w, 5, note, 0)  # Default left alignment
+                pass
 
         # Save record
         db.invoiceMHD.insert_one({
@@ -295,6 +320,7 @@ def generate_invoice_endpoint():
             'invoice_date': data['invoice_date'],
             'due_date': data['due_date'],
             'notes': note,
+            'bank_Note':bank_note,
             'total_amount': total,
             'payment_method': payment_method
         })

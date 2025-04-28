@@ -95,12 +95,6 @@ class InvoicePDF(FPDF):
         self.cell(0, 6, ci['email'], ln=1, align='R')
         self.ln(12)
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Lexend', '', 8)
-        self.set_text_color(100, 100, 100)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
 @enoylity_bp.route('/generate-invoice', methods=['POST'])
 def generate_invoice_endpoint():
     try:
@@ -126,7 +120,6 @@ def generate_invoice_endpoint():
         required_fields = {
             "bill_to_name":     "Billing name is required",
             "bill_to_address":  "Billing address is required",
-            "bill_to_email":    "Billing email is required",
             "invoice_date":     "Invoice date is required",
             "due_date":         "Due date is required"
         }
@@ -137,9 +130,10 @@ def generate_invoice_endpoint():
 
         bt_name = data['bill_to_name']
         bt_addr = data['bill_to_address']
-        bt_phone = data['bill_to_phone']
-        bt_mail = data['bill_to_email']
-        note    = data['note']
+        bt_phone = data.get('bill_to_phone',"")
+        bt_mail = data.get('bill_to_email',"")
+        note      = data.get('note', '')
+        bank_note = data.get('bank_Note', '')
         items   = data.get('items', [])
         payment_method = int(data.get('payment_method', 0))
         invoice_date   = data['invoice_date']
@@ -222,22 +216,21 @@ def generate_invoice_endpoint():
 
         # — Payment fee & total
         if payment_method == 0:
-            fee = round(subtotal * 0.055,2)
+            fee = subtotal * 0.056
             total = subtotal + fee
             pdf.ln(4)
             pdf.set_font('Lexend','',13)
             pdf.cell(140,8,'PayPal Fee',0,0,'R')
-            pdf.cell(45,8,f'${fee:.2f}',0,1,'C')
+            pdf.cell(45,8,f'$ {fee:.2f}',0,1,'C')
         else:
             total = subtotal
-        pdf.ln(8)
+        pdf.ln(6)
         pdf.set_font('Lexend','B',14)
-        pdf.cell(135,7,'TOTAL',0,0,'R')
-        pdf.cell(39,8,f'USD ${total:.2f}',0,1,'C')
+        pdf.cell(135,8,'TOTAL ',0,0,'R')
+        pdf.cell(39,8,f'USD $ {total:.2f}',0,1,'C')
 
         # — Payment Info & Note side-by-side
-        pdf.ln(15)
-
+        pdf.ln(10)
         x = pdf.l_margin
         y = pdf.get_y()
         width = pdf.w - pdf.l_margin - pdf.r_margin
@@ -246,62 +239,105 @@ def generate_invoice_endpoint():
         left_col_width = width / 2 - 5
         right_col_width = width / 2 - 5
 
-        # Remove background color — skip rect or draw without fill ('D' for border only if needed)
-
-        # Add a border only if you want, otherwise comment the next line:
-        # pdf.rect(x, y, left_col_width, 40, 'D')  # 'D' means only border (Draw)
-
         pdf.set_xy(x, y+7)  # Added padding of 6 units
 
         pdf.set_font('Lexend', 'B', 12)
         pdf.set_text_color(*settings['colors']['black'])
 
         if payment_method == 0:
+            left_x   = x
+            right_x  = x + left_col_width + 10
+            top_y    = y
+
+            if note:
+                pdf.set_xy(right_x, top_y-1)
+                pdf.set_font('Lexend', 'B', 12)
+                pdf.cell(right_col_width - 12, 6, 'Note:', ln=1)
+
+                pdf.set_font('Lexend', 11)
+                pdf.set_xy(right_x, top_y + 6)
+                for line in note('\n'):
+                    pdf.set_x(right_x)
+                    pdf.cell(right_col_width - 20, 6, line, ln=1)
+
             # PayPal
-            paypal = settings['paypal_details']
+            pdf.set_xy(left_x, top_y)
+            pdf.set_font('Lexend', 'B', 12)
             pdf.cell(left_col_width-12, 6, 'PayPal Details:', ln=1)  # Adjusted width because of padding
+            paypal = settings['paypal_details']
             pdf.set_font('Lexend', '', 11)
             pdf.cell(left_col_width-12, 6, f"Receiver: {paypal['receiver_email']}", ln=1)
             pdf.cell(left_col_width-12, 6, f"PayPal Name: {paypal['paypal_name']}", ln=1)
+
         elif payment_method == 1:
-            # Bank
+            # define column origins
+            left_x   = x
+            right_x  = x + left_col_width + 10
+            top_y    = y
+
+            # ─── Left Column: Bank Details ──────────────────────────────────────────
+            pdf.set_xy(left_x, top_y)
+            pdf.set_font('Lexend', 'B', 12)
+            pdf.cell(left_col_width - 12, 6, 'Bank Details:', ln=1)
+            
             bank = settings['bank_details']
-            pdf.cell(left_col_width-12, 6, 'Bank Details:', ln=1)
             pdf.set_font('Lexend', '', 11)
-            pdf.cell(left_col_width-12, 6, f"Account Name: {bank['account_name']}", ln=1)
-            pdf.cell(left_col_width-12, 6, f"Account No: {bank['account_number']}", ln=1)
-            pdf.cell(left_col_width-12, 6, f"Routing No: {bank['routing_number']}", ln=1)
-            pdf.cell(left_col_width-12, 6, f"Bank: {bank['bank_name']}", ln=1)
-            pdf.cell(left_col_width-12, 6, f"Address: {bank['bank_address']}", ln=1)
+            for line in (
+                f"Account Name: {bank['account_name']}",
+                f"Account No:   {bank['account_number']}",
+                f"Routing No:   {bank['routing_number']}",
+                f"Bank:         {bank['bank_name']}",
+                f"Address:      {bank['bank_address']}",
+            ):
+                pdf.set_x(left_x)
+                pdf.cell(left_col_width - 20, 6, line, ln=1)
+
+            # optional Bank Note underneath
+            if bank_note:
+                pdf.ln(2)
+                pdf.set_x(left_x)
+                pdf.set_font('Lexend', 'B', 12)
+                pdf.cell(left_col_width - 12, 6, 'Bank Note:', ln=1)
+                pdf.set_font('Lexend', '', 11)
+                pdf.set_x(left_x)
+                pdf.multi_cell(left_col_width - 12, 6, bank_note)
+
+            # ─── Right Column: Generic Note ─────────────────────────────────────────
+            if note:
+                pdf.set_xy(right_x, top_y)
+                pdf.set_font('Lexend', 'B', 12)
+                pdf.cell(right_col_width - 12, 6, 'Note:', ln=1)
+
+                pdf.set_font('Lexend', '', 11)
+                # move down 8 points from the 'Note:' header
+                pdf.set_xy(right_x, top_y + 8)
+                for line in note.split('\n'):
+                    pdf.set_x(right_x)
+                    pdf.cell(right_col_width - 20, 6, line, ln=1)
+
         else:
-            # No Payment Info
-            pdf.cell(left_col_width-12, 6, 'Payment Method: N/A', ln=1)
+            if note:
+                pdf.set_xy(x, y)
+                pdf.set_xy(x, y + 6)  # Padding on right side too
 
-        # Note Right
-        pdf.set_xy(x + left_col_width + 10, y)
-        # Again, no background fill
-        # pdf.rect(x + left_col_width + 10, y, right_col_width, 40, 'D')  # Optional border
+                pdf.set_font('Lexend', 'B', 12)
+                pdf.cell(right_col_width-12, 6, 'Note:', ln=1)
 
-        pdf.set_xy(x + left_col_width + 16, y + 6)  # Padding on right side too
+                pdf.set_font('Lexend', '', 11)
 
-        pdf.set_font('Lexend', 'B', 12)
-        pdf.cell(right_col_width-12, 6, 'Note:', ln=1)
+                # Save the current X and Y to manually control text position
+                start_x = x 
+                start_y = y + 10
 
-        pdf.set_font('Lexend', '', 11)
+                pdf.set_xy(start_x, start_y)
 
-        # Save the current X and Y to manually control text position
-        start_x = x + left_col_width + 16
-        start_y = y + 12
+                # Now split the note into lines manually
+                lines = note.split('\n')
+                for line in lines:
+                    pdf.set_x(start_x)
+                    pdf.cell(right_col_width-20, 10, line, ln=1)
 
-        pdf.set_xy(start_x, start_y)
-
-        # Now split the note into lines manually
-        lines = note.split('\n')
-        for line in lines:
-            pdf.set_x(start_x)
-            pdf.cell(right_col_width-20, 10, line, ln=1)
-
-
+                pass
 
         # 6️⃣ Persist invoice record
         inv_id = ''.join(choices(_str.digits, k=16))
@@ -320,6 +356,8 @@ def generate_invoice_endpoint():
             'payment_method':    payment_method,
             'subtotal':          subtotal,
             'total':             total,
+            'note':             note,
+            'bank_Note':        bank_note,
             'created_at':        datetime.utcnow()
         }
 

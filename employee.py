@@ -27,33 +27,49 @@ def generate_unique_employee_id():
 @employee_bp.route('/SaveRecord', methods=['POST'])
 def add_employee():
     data = request.get_json(force=True)
-    # Required fields
-    required = ["name", "email", "phone", "dob", "adharnumber", "pan_number", "date_of_joining",  "base_salary", "department", "designation"]
-    if not all(data.get(f) for f in required):
+
+    # Required fields (now including employeeId)
+    required = [
+        "employeeId", "name", "email", "phone", "dob",
+        "adharnumber", "pan_number", "date_of_joining", 
+        "base_salary", "department", "designation"
+    ]
+    
+    # Check for missing fields
+    if not all(data.get(field) for field in required):
         return format_response(False, "Missing required employee details", status=400)
 
-    # Check uniqueness
-    if db.employees.find_one({"$or": [{"email": data['email']}, {"phone": data['phone']}] }):
-        return format_response(False, "Employee already exists with this email or phone number", status=409)
+    # Check uniqueness of employeeId, email, or phone
+    if db.employees.find_one({
+        "$or": [
+            {"employeeId": data['employeeId']},
+            {"email": data['email']},
+            {"phone": data['phone']}
+        ]
+    }):
+        return format_response(
+            False,
+            "Employee already exists with this ID, email, or phone number",
+            status=409
+        )
 
-    # Validate dates
+    # Validate date formats
     for field in ("dob", "date_of_joining"):  
         try:
             datetime.strptime(data[field], "%Y-%m-%d")
         except ValueError:
             return format_response(False, f"{field} must be YYYY-MM-DD", status=400)
 
-    # Parse numeric
+    # Parse numeric salary fields
     try:
-        data['annual_salary'] = float(data['base_salary']) * 12
-        data['base_salary'] = float(data['base_salary'])
+        base_salary = float(data['base_salary'])
+        annual_salary = base_salary * 12
     except (ValueError, TypeError):
         return format_response(False, "Salary fields must be numbers", status=400)
 
-    # Generate ID and assemble record
-    employee_id = generate_unique_employee_id()
+    # Assemble record using user-provided ID
     record = {
-        "employeeId": employee_id,
+        "employeeId": data['employeeId'],
         "name": data['name'],
         "email": data['email'],
         "phone": data['phone'],
@@ -61,16 +77,25 @@ def add_employee():
         "adharnumber": data['adharnumber'],
         "pan_number": data['pan_number'],
         "date_of_joining": data['date_of_joining'],
-        "annual_salary": data['annual_salary'],
-        "base_salary":data['base_salary'],
+        "base_salary": base_salary,
+        "annual_salary": annual_salary,
         "bank_details": data.get('bank_details', {}),
         "address": data.get('address', {}),
         "department": data['department'],
         "designation": data['designation'],
         "created_at": datetime.utcnow()
     }
-    _ = db.employees.insert_one(record)
-    return format_response(True, "Employee added successfully", {"employeeId": employee_id}, status=201)
+    
+    # Insert into the database
+    db.employees.insert_one(record)
+
+    return format_response(
+        True,
+        "Employee added successfully",
+        {"employeeId": data['employeeId']},
+        status=201
+    )
+
 
 @employee_bp.route('/update', methods=['POST'])
 def update_employee():

@@ -86,7 +86,6 @@ class InvoicePDF(FPDF):
                 f"{self.invoice_data['website']}"
             )
             self.cell(0, 4, contact, 0, 1, 'C')
-        self.cell(0, 4, f'Page {self.page_no()}', 0, 1, 'C')
 
 
 def create_invoice(invoice_data):
@@ -309,7 +308,7 @@ def generate_invoice_route():
         subtotal = sum(i['quantity'] * i['price'] for i in items)
         data['subtotal'] = subtotal
         pm = int(data.get('payment_method', 0))
-        paypal_fee = round(subtotal * 0.055, 2) if pm == 0 else 0.0
+        paypal_fee = subtotal * 0.056 if pm == 0 else 0.0
         data['paypal_fee'] = paypal_fee
         data['total'] = subtotal + paypal_fee
         data['payment_method_text'] = {0: "PayPal", 1: "Bank Transfer"}.get(pm, "Other")
