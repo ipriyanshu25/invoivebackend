@@ -178,15 +178,17 @@ def get_invoice_settings():
 def update_invoice_settings():
     data = request.get_json() or {}
 
-    settings_id = data.get("settings_id")
-    if not settings_id:
-        return format_response(False, "No settings_id provided", status=400)
+    # Now accept invoice_type instead of settings_id
+    invoice_type = data.get("invoice_type")
+    if not invoice_type:
+        return format_response(False, "No invoice_type provided", status=400)
 
-    settings = db.settings_invoice.find_one({"settings_id": settings_id})
+    # Lookup settings by invoice_type
+    settings = db.settings_invoice.find_one({"invoice_type": invoice_type})
     if not settings:
-        return format_response(False, f"Settings with id '{settings_id}' not found", status=404)
+        return format_response(False, f"Settings for invoice type '{invoice_type}' not found", status=404)
 
-    update_data = {k: v for k, v in data.items() if k != "settings_id"}
+    update_data = {k: v for k, v in data.items() if k != "invoice_type"}
     if not update_data:
         return format_response(False, "No update data provided", status=400)
 
@@ -207,47 +209,28 @@ def update_invoice_settings():
 
     allowed_updates["last_updated"] = datetime.now()
 
+    # Perform update
     updated = db.settings_invoice.find_one_and_update(
-        {"settings_id": settings_id},
+        {"invoice_type": invoice_type},
         {"$set": allowed_updates},
         return_document=ReturnDocument.AFTER
     )
     if not updated:
         return format_response(False, "Failed to update settings", status=500)
 
+    # Convert _id for JSON
     updated["_id"] = str(updated["_id"])
-    return format_response(True, f"Settings {settings_id} updated", data=updated)
 
-@settings_bp.route('/restore', methods=['POST'])
-def restore_default_settings():
-    data = request.get_json() or {}
-
-    settings_id = data.get("settings_id")
-    if not settings_id:
-        return format_response(False, "No settings_id provided", status=400)
-
-    settings = db.settings_invoice.find_one({"settings_id": settings_id})
-    if not settings:
-        return format_response(False, f"Settings with id '{settings_id}' not found", status=404)
-
-    invoice_type = settings.get("invoice_type")
-    module_name = INVOICE_MODULES.get(invoice_type)
-    default_info = extract_company_info(module_name)
-
-    result = db.settings_invoice.update_one(
-        {"settings_id": settings_id},
-        {"$set": {
-            "editable_fields": default_info,
-            "last_updated": datetime.now()
-        }}
+    # Return invoice_type instead of settings_id
+    return format_response(
+        True,
+        f"Settings for invoice type '{invoice_type}' updated",
+        data={
+            "invoice_type": invoice_type,
+            "last_updated": updated.get("last_updated"),
+            "editable_fields": updated.get("editable_fields")
+        }
     )
-    if result.modified_count == 0:
-        return format_response(False, "Failed to restore default settings", status=500)
-
-    updated = db.settings_invoice.find_one({"settings_id": settings_id})
-    updated["_id"] = str(updated["_id"])
-    return format_response(True, f"Default settings restored for {settings_id}", data=updated)
-
 
 # ======= NEW SALARY SLIP SETTINGS ROUTES =======
 
@@ -304,29 +287,6 @@ def update_salary_settings():
     updated["_id"] = str(updated.get("_id"))  # convert _id to string if exists
 
     return format_response(True, "Salary slip settings updated", data=updated)
-
-
-
-@settings_bp.route('/salary/restore', methods=['POST'])
-def restore_salary_settings():
-    """Restore default salary slip settings"""
-    # Update with default settings
-    result = db.settings_salary.update_one(
-        {"settings_type": "salary_slip"},
-        {"$set": {
-            "company_info": DEFAULT_SALARY_SLIP_INFO,
-            "last_updated": datetime.now()
-        }}
-    )
-    
-    if result.modified_count == 0 and result.matched_count == 0:
-        return format_response(False, "Failed to restore default salary slip settings", status=500)
-    
-    # Get updated settings
-    updated = db.settings_salary.find_one({"settings_type": "salary_slip"})
-    updated["_id"] = str(updated["_id"])
-    
-    return format_response(True, "Default salary slip settings restored", data=updated)
 
 
 # Utility functions for invoice modules to access settings
