@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from fpdf import FPDF
 from pymongo import ReturnDocument
+from bson import ObjectId
 
 from utils import format_response
 from db import db
@@ -375,3 +376,44 @@ def get_invoice_list():
         )
     except Exception:
         return format_response(False, 'Internal server error', status=500)
+
+
+
+
+@invoice_bp.route('/getinvoice', methods=['POST'])
+def get_invoice_by_id():
+    try:
+        data = request.get_json() or {}
+        invoice_id = data.get('_id')
+        if not invoice_id:
+            return format_response(False, "_id is required", status=400)
+
+        # 1️⃣ Parse and validate ObjectId
+        try:
+            obj_id = ObjectId(invoice_id)
+        except Exception:
+            return format_response(False, "Invalid _id format", status=400)
+
+        # 2️⃣ Fetch the document
+        doc = db.invoiceMHD.find_one({'_id': obj_id})
+        if not doc:
+            return format_response(False, "Invoice not found", status=404)
+
+        # 3️⃣ Build response payload (convert ObjectId -> str)
+        payload = {
+            '_id':        str(doc['_id']),
+            'invoice_number': doc.get('invoice_number'),
+            'bill_to':    doc.get('bill_to', {}),
+            'items':      doc.get('items', []),
+            'invoice_date':   doc.get('invoice_date'),
+            'due_date':       doc.get('due_date'),
+            'notes':      doc.get('notes', ''),
+            'total_amount':   doc.get('total_amount', 0),
+            'payment_method': doc.get('payment_method', 0)
+        }
+
+        return format_response(True, "Invoice retrieved", payload)
+
+    except Exception:
+        logging.exception("Error fetching invoice by _id")
+        return format_response(False, "Internal server error", status=500)

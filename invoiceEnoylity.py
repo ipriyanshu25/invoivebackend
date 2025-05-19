@@ -1,3 +1,4 @@
+import logging
 from flask import Blueprint, request, send_file
 import io
 import os
@@ -5,7 +6,7 @@ import datetime
 import requests
 from fpdf import FPDF
 from pymongo import ReturnDocument
-
+from bson import ObjectId
 from utils import format_response
 from db import db
 from settings import get_current_settings  # dynamic settings fetch
@@ -402,3 +403,34 @@ def get_invoice_list():
     except Exception as e:
         print(f"Error retrieving invoice list: {str(e)}")
         return format_response(False, 'Internal server error', status=500)
+    
+
+
+    
+
+@invoice_enoylity_bp.route('/getinvoice', methods=['POST'])
+def get_invoice_by_id():
+    try:
+        data = request.get_json() or {}
+        invoice_id = data.get('_id')
+        if not invoice_id:
+            return format_response(False, "_id is required", status=400)
+
+        # Validate ObjectId format
+        try:
+            obj_id = ObjectId(invoice_id)
+        except Exception:
+            return format_response(False, "Invalid _id format", status=400)
+
+        # Fetch from MongoDB
+        doc = db.invoiceEnoylity.find_one({'_id': obj_id})
+        if not doc:
+            return format_response(False, "Invoice not found", status=404)
+
+        # Serialize _id and return full document
+        doc['_id'] = str(doc['_id'])
+        return format_response(True, "Invoice retrieved successfully", doc)
+
+    except Exception as e:
+        logging.exception(f"Error fetching invoice by _id: {e}")
+        return format_response(False, "Internal server error", status=500)

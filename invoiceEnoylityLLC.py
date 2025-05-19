@@ -266,3 +266,36 @@ def list_invoices():
     except Exception as e:
         logging.exception("Error listing invoices")
         return format_response(False, "Internal server error"), 500
+
+@enoylity_bp.route('/getdetails', methods=['POST'])
+def get_invoice_details():
+    # 1️⃣ Pull the invoice ID from the request
+    data = request.get_json() or {}
+    inv_id = data.get('invoiceenoylityId')
+    if not inv_id:
+        return format_response(False, "invoiceenoylityId is required", status=400)
+
+    # 2️⃣ Query MongoDB
+    doc = db.invoiceEnoylityLLC.find_one({'invoiceenoylityId': inv_id})
+    if not doc:
+        return format_response(False, "Invoice not found", status=404)
+
+    # 3️⃣ Serialize and normalize dates
+    response_data = {
+        'invoiceenoylityId': doc['invoiceenoylityId'],
+        'invoice_number':    doc.get('invoice_number'),
+        'invoice_date':      doc.get('invoice_date'),
+        'due_date':          doc.get('due_date'),
+        'bill_to':           doc.get('bill_to', {}),
+        'items':             doc.get('items', []),
+        'payment_method':    doc.get('payment_method', 0),
+        'subtotal':          doc.get('subtotal', 0),
+        'total':             doc.get('total', 0),
+        'note':              doc.get('note', ''),
+        'bank_Note':         doc.get('bank_Note', ''),
+        'payment_info':      doc.get('payment_info', {}),
+        'created_at':        doc['created_at'].strftime('%Y-%m-%dT%H:%M:%SZ')
+    }
+
+    # 4️⃣ Return everything in your standard format
+    return format_response(True, "Invoice details retrieved", response_data)
