@@ -1,1 +1,2 @@
 .env
+.env.*   # if you have multiple like .env.local, .env.production
