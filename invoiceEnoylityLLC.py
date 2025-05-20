@@ -267,13 +267,13 @@ def list_invoices():
         logging.exception("Error listing invoices")
         return format_response(False, "Internal server error"), 500
 
-@enoylity_bp.route('/getdetails', methods=['POST'])
+@enoylity_bp.route('/getinvoice', methods=['POST'])
 def get_invoice_details():
     # 1️⃣ Pull the invoice ID from the request
     data = request.get_json() or {}
-    inv_id = data.get('invoiceenoylityId')
+    inv_id = data.get('id')
     if not inv_id:
-        return format_response(False, "invoiceenoylityId is required", status=400)
+        return format_response(False, "id is required", status=400)
 
     # 2️⃣ Query MongoDB
     doc = db.invoiceEnoylityLLC.find_one({'invoiceenoylityId': inv_id})

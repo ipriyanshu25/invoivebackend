@@ -34,7 +34,7 @@ DEFAULT_SETTINGS = {
     "company_info": {
         "name":       "MHD Tech",
         "address":    "8825 Perimeter Park Blvd Ste 501",
-        "city_state": "Jacksonville, Florida, USA",
+        "city_state": "Jnnacksonville, Florida, USA",
         "phone":      "+15075561971",
         "youtube":    "youtube.com/@mhd_tech",
         "email":      "aria@mhdtechpro.com"
@@ -384,15 +384,15 @@ def get_invoice_list():
 def get_invoice_by_id():
     try:
         data = request.get_json() or {}
-        invoice_id = data.get('_id')
+        invoice_id = data.get('id')
         if not invoice_id:
-            return format_response(False, "_id is required", status=400)
+            return format_response(False, "id is required", status=400)
 
         # 1️⃣ Parse and validate ObjectId
         try:
             obj_id = ObjectId(invoice_id)
         except Exception:
-            return format_response(False, "Invalid _id format", status=400)
+            return format_response(False, "Invalid id format", status=400)
 
         # 2️⃣ Fetch the document
         doc = db.invoiceMHD.find_one({'_id': obj_id})

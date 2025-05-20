@@ -412,15 +412,15 @@ def get_invoice_list():
 def get_invoice_by_id():
     try:
         data = request.get_json() or {}
-        invoice_id = data.get('_id')
+        invoice_id = data.get('id')
         if not invoice_id:
-            return format_response(False, "_id is required", status=400)
+            return format_response(False, "id is required", status=400)
 
         # Validate ObjectId format
         try:
             obj_id = ObjectId(invoice_id)
         except Exception:
-            return format_response(False, "Invalid _id format", status=400)
+            return format_response(False, "Invalid id format", status=400)
 
         # Fetch from MongoDB
         doc = db.invoiceEnoylity.find_one({'_id': obj_id})
