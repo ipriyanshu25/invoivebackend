@@ -206,14 +206,14 @@ class ImprovedSalarySlipPDF(FPDF):
         self.cell(data_col_width, 6, str(employee['lop']), 0, 0)
         
 
-        self.set_font('Lexend', 'B', 9)
-        self.set_text_color(*self.secondary_color)
-        self.cell(left_col_width, 6, 'Monthly Salary:', 0, 0)
-        self.set_font('Lexend', '', 9)
-        self.set_text_color(0, 0, 0)
-        self.cell(data_col_width, 6, str(employee['month_salary']), 0, 1)
+        # self.set_font('Lexend', 'B', 9)
+        # self.set_text_color(*self.secondary_color)
+        # self.cell(left_col_width, 6, 'Monthly Salary:', 0, 0)
+        # self.set_font('Lexend', '', 9)
+        # self.set_text_color(0, 0, 0)
+        # self.cell(data_col_width, 6, str(employee['month_salary']), 0, 1)
 
-        self.ln(5)
+        self.ln(10)
         
         # Calculate usable width for the table
         table_width = self.w - self.left_margin - self.right_margin - 4  # -4 for 2mm margin on each side
@@ -452,78 +452,90 @@ class SalarySlipGenerator:
         
     
     def calculate_salary(self):
-        """Calculate salary after LOP deductions and then compute gross salary correctly."""
+        """Calculate salary after LOP deductions and then compute gross salary, 
+        using passed-in TDS if provided, else computing tax."""
         # 1) Pull in structure and dates
         salary_structure = self.employee_data['salary_structure']
-        total_days = self.employee_data['total_days']
-        lop_days = self.employee_data.get('lop', 0)  # can be 1, 0.5, etc.
+        total_days     = self.employee_data['total_days']
+        lop_days       = self.employee_data.get('lop', 0)
 
-        # 2) Define allowed components
-        allowed_components = {'Basic Pay', 'House Rent Allowance', 'Performance Bonus', 'Overtime Bonus', 'Special Allowance'}
+        # 2) Allowed components
+        allowed = {
+            'Basic Pay', 'House Rent Allowance',
+            'Performance Bonus', 'Overtime Bonus', 'Special Allowance'
+        }
 
-        # 3) Prepare adjusted earnings list
+        # 3) Build earnings list (apply LOP only to Special Allowance)
         earnings = []
-        adjusted_special_allowance = 0.0
-
         for item in salary_structure:
-            name = item['name']
-            if name not in allowed_components:
-                continue  # Skip other components
-
-            amount = item['amount']
-
+            name   = item['name']
+            amount = float(item['amount'])
+            if name not in allowed:
+                continue
             if name == 'Special Allowance':
-                # Calculate LOP deduction only on Special Allowance
-                per_day = amount / total_days
-                lop_deduction = per_day * lop_days
-                amount = max(0.0, amount - lop_deduction)
-                adjusted_special_allowance = amount  # Save adjusted Special Allowance
-
+                per_day      = amount / total_days
+                lop_deduct   = per_day * lop_days
+                amount      -= lop_deduct
             earnings.append({
-                'name': name,
+                'name':   name,
                 'amount': f"Rs. {amount:.2f}"
             })
 
-        # 4) Now, calculate gross_monthly after LOP adjustment
-        gross_monthly = sum(float(item['amount'].replace('Rs. ', '')) for item in earnings)
-
-        # 5) For tax purposes, annual income is based on **full gross without LOP deduction**
-        full_gross_monthly = sum(
-            item['amount'] for item in salary_structure
-            if item['name'] in allowed_components
+        # 4) Gross monthly post-LOP
+        gross_monthly = sum(
+            float(e['amount'].replace('Rs. ', '')) for e in earnings
         )
-        self.annual_salary = full_gross_monthly * 12
 
-        # 6) Run existing tax logic
-        tax_notes = self.calculate_tax()  # populates self.tax_details
-        monthly_tax = self.tax_details['monthly_tax']
+        # 5) For annual tax, use full gross without LOP
+        full_gross = sum(
+            item['amount'] for item in salary_structure
+            if item['name'] in allowed
+        )
+        self.annual_salary = full_gross * 12
 
-        # 7) Prepare deductions (only Income Tax/TDS here)
+        # 6) Decide TDS: passed-in vs calculated
+        tds_passed = self.employee_data.get('Tax Deduction at Source (TDS)')
+        if tds_passed is not None and float(tds_passed) > 0:
+            monthly_tax = float(tds_passed)
+            # populate minimal tax_details for consistency
+            self.tax_details = {
+                'monthly_tax': monthly_tax,
+                'taxable_income': None,
+                'tax_before_cess': None,
+                'cess': None,
+                'annual_tax': None,
+                'rebate_applied': None,
+                'marginal_relief_applicable': None
+            }
+        else:
+            # fallback to your existing logic
+            self.calculate_tax()  # fills self.tax_details
+            monthly_tax = self.tax_details['monthly_tax']
+
+        # 7) Build deductions list
         deductions = []
         if monthly_tax > 0:
             deductions.append({
-                'name': 'Income Tax (TDS)',
+                'name':   'Income Tax (TDS)',
                 'amount': f"Rs. {monthly_tax:.2f}"
             })
 
-        # 8) Totals: TDS only (LOP already deducted inside earnings/gross)
-        total_deductions_amount = monthly_tax
-        net_payable = gross_monthly - total_deductions_amount
-        annual_net_payable = net_payable * 12
+        # 8) Compute net payable
+        net_payable = gross_monthly - monthly_tax
 
-        # 9) Store everything for PDF rendering
+        # 9) Store into salary_details
         self.salary_details = {
-            'earnings': earnings,
-            'deductions': deductions,
+            'earnings':       earnings,
+            'deductions':     deductions,
             'gross_earnings': f"Rs. {gross_monthly:.2f}",
-            'total_deductions': f"Rs. {total_deductions_amount:.2f}",
-            'net_payable': f"Rs. {net_payable:.2f}",
-            'annual_income': f"Rs. {self.annual_salary:.2f}",
-            'annual_net_payable': f"Rs. {annual_net_payable:.2f}",
-            'amount_in_words': f"{num2words(int(net_payable), lang='en_IN').title()} Only"
+            'total_deductions': f"Rs. {monthly_tax:.2f}",
+            'net_payable':      f"Rs. {net_payable:.2f}",
+            'annual_income':    f"Rs. {self.annual_salary:.2f}",
+            'annual_net_payable': f"Rs. {(net_payable*12):.2f}",
+            'amount_in_words':    f"{num2words(int(net_payable), lang='en_IN').title()} Only"
         }
 
-        return tax_notes
+        return  # if you were returning tax_notes before, you can still return self.tax_details or None
 
 
     
