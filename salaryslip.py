@@ -177,10 +177,10 @@ class ImprovedSalarySlipPDF(FPDF):
         
         self.set_font('Lexend', 'B', 9)
         self.set_text_color(*self.secondary_color)
-        self.cell(left_col_width, 6, 'Bank Account:', 0, 0)
+        self.cell(left_col_width, 6, 'Bank Name:', 0, 0)
         self.set_font('Lexend', '', 9)
         self.set_text_color(0, 0, 0)
-        self.cell(data_col_width, 6, str(employee['bank_account']), 0, 1)
+        self.cell(data_col_width, 6, str(employee['bank_name']), 0, 1)
         
         self.set_font('Lexend', 'B', 9)
         self.set_text_color(*self.secondary_color)
@@ -191,10 +191,10 @@ class ImprovedSalarySlipPDF(FPDF):
         
         self.set_font('Lexend', 'B', 9)
         self.set_text_color(*self.secondary_color)
-        self.cell(left_col_width, 6, 'PAN:', 0, 0)
+        self.cell(left_col_width, 6, 'Bank Account:', 0, 0)
         self.set_font('Lexend', '', 9)
         self.set_text_color(0, 0, 0)
-        self.cell(data_col_width, 6, str(employee['pan']), 0, 1)
+        self.cell(data_col_width, 6, str(employee['bank_account']), 0, 1)
         
         # Add space after employee details
         self.set_x(self.left_margin)
@@ -206,12 +206,12 @@ class ImprovedSalarySlipPDF(FPDF):
         self.cell(data_col_width, 6, str(employee['lop']), 0, 0)
         
 
-        # self.set_font('Lexend', 'B', 9)
-        # self.set_text_color(*self.secondary_color)
-        # self.cell(left_col_width, 6, 'Monthly Salary:', 0, 0)
-        # self.set_font('Lexend', '', 9)
-        # self.set_text_color(0, 0, 0)
-        # self.cell(data_col_width, 6, str(employee['month_salary']), 0, 1)
+        self.set_font('Lexend', 'B', 9)
+        self.set_text_color(*self.secondary_color)
+        self.cell(left_col_width, 6, 'PAN:', 0, 0)
+        self.set_font('Lexend', '', 9)
+        self.set_text_color(0, 0, 0)
+        self.cell(data_col_width, 6, str(employee['pan']), 0, 1)
 
         self.ln(10)
         
@@ -452,12 +452,11 @@ class SalarySlipGenerator:
         
     
     def calculate_salary(self):
-        """Calculate salary after LOP deductions and then compute gross salary, 
-        using passed-in TDS if provided, else computing tax."""
+        """Calculate salary after LOP deductions, with TDS defaulting to 0 if not provided."""
         # 1) Pull in structure and dates
         salary_structure = self.employee_data['salary_structure']
-        total_days     = self.employee_data['total_days']
-        lop_days       = self.employee_data.get('lop', 0)
+        total_days       = self.employee_data['total_days']
+        lop_days         = self.employee_data.get('lop', 0)
 
         # 2) Allowed components
         allowed = {
@@ -465,17 +464,13 @@ class SalarySlipGenerator:
             'Performance Bonus', 'Overtime Bonus', 'Special Allowance'
         }
 
-        # 3) Build earnings list (apply LOP only to Special Allowance)
+        # 3) Build earnings list
         earnings = []
         for item in salary_structure:
             name   = item['name']
             amount = float(item['amount'])
             if name not in allowed:
                 continue
-            if name == 'Special Allowance':
-                per_day      = amount / total_days
-                lop_deduct   = per_day * lop_days
-                amount      -= lop_deduct
             earnings.append({
                 'name':   name,
                 'amount': f"Rs. {amount:.2f}"
@@ -486,35 +481,34 @@ class SalarySlipGenerator:
             float(e['amount'].replace('Rs. ', '')) for e in earnings
         )
 
-        # 5) For annual tax, use full gross without LOP
+        # 5) For annual tax calculations (if ever needed)
         full_gross = sum(
-            item['amount'] for item in salary_structure
+            float(item['amount']) for item in salary_structure
             if item['name'] in allowed
         )
         self.annual_salary = full_gross * 12
 
-        # 6) Decide TDS: passed-in vs calculated
+        # 6) TDS: use passed-in if provided; else zero
         tds_passed = self.employee_data.get('Tax Deduction at Source (TDS)')
-        if tds_passed is not None and float(tds_passed) > 0:
-            monthly_tax = float(tds_passed)
-            # populate minimal tax_details for consistency
-            self.tax_details = {
-                'monthly_tax': monthly_tax,
-                'taxable_income': None,
-                'tax_before_cess': None,
-                'cess': None,
-                'annual_tax': None,
-                'rebate_applied': None,
-                'marginal_relief_applicable': None
-            }
-        else:
-            # fallback to your existing logic
-            self.calculate_tax()  # fills self.tax_details
-            monthly_tax = self.tax_details['monthly_tax']
+        try:
+            monthly_tax = float(tds_passed) if tds_passed is not None else 0.0
+        except (ValueError, TypeError):
+            monthly_tax = 0
+
+        # record it in tax_details
+        self.tax_details = {
+            'monthly_tax': monthly_tax,
+            'taxable_income': None,
+            'tax_before_cess': None,
+            'cess': None,
+            'annual_tax': None,
+            'rebate_applied': None,
+            'marginal_relief_applicable': None
+        }
 
         # 7) Build deductions list
         deductions = []
-        if monthly_tax > 0:
+        if monthly_tax >= 0:
             deductions.append({
                 'name':   'Income Tax (TDS)',
                 'amount': f"Rs. {monthly_tax:.2f}"
@@ -525,15 +519,16 @@ class SalarySlipGenerator:
 
         # 9) Store into salary_details
         self.salary_details = {
-            'earnings':       earnings,
-            'deductions':     deductions,
-            'gross_earnings': f"Rs. {gross_monthly:.2f}",
+            'earnings':         earnings,
+            'deductions':       deductions,
+            'gross_earnings':   f"Rs. {gross_monthly:.2f}",
             'total_deductions': f"Rs. {monthly_tax:.2f}",
             'net_payable':      f"Rs. {net_payable:.2f}",
             'annual_income':    f"Rs. {self.annual_salary:.2f}",
             'annual_net_payable': f"Rs. {(net_payable*12):.2f}",
             'amount_in_words':    f"{num2words(int(net_payable), lang='en_IN').title()} Only"
         }
+
 
         return  # if you were returning tax_notes before, you can still return self.tax_details or None
 
@@ -568,6 +563,7 @@ class SalarySlipGenerator:
                 "emp_no": self.employee_data.get('emp_no', ''),
                 "department": self.employee_data.get('department', ''),
                 "bank_account": self.employee_data.get('bank_account', ''),
+                "bank_name":self.employee_data.get('bank_name',''),
                 "pan": self.employee_data.get('pan', ''),
                 "working_days": self.employee_data['working_days'],
                 "lop": self.employee_data.get('lop', 0),

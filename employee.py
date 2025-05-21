@@ -206,6 +206,7 @@ def get_salary_slip():
         "department": emp.get('department',''),
         "doj": datetime.strptime(emp['date_of_joining'], "%Y-%m-%d").strftime("%d-%m-%Y"),
         "bank_account": emp.get('bank_details',{}).get('account_number',''),
+        "bank_name": emp.get('bank_details',{}).get('bank_name',''),
         "pan": emp.get('pan_number',''),
         "lop": float(data.get('lop',0)),
         "salary_structure": final_struct,
@@ -231,42 +232,35 @@ def get_salary_slip():
         "filename": f"salary_slip_{emp_id}.pdf"
     })
 
-    return send_file(pdf_buf, mimetype='application/pdf', as_attachment=True,
-                     download_name=f"salary_slip_{emp_id}.pdf")
-
-
-import math
-import re
-from flask import request
+    return send_file(pdf_buf, mimetype='application/pdf', as_attachment=True,download_name=f"salary_slip_{emp_id}.pdf")
 
 @employee_bp.route('/getpayslips', methods=['POST'])
 def get_payslips():
     params = request.get_json(force=True) or {}
     query = {}
 
-    if params.get('search'):
-        query['$text'] = {'$search': params['search']}
 
+    # filter by month (partial, case-insensitive)
     if params.get('month'):
-        # build a case-insensitive regex so "May", "may", or even partials like "Ma" match
         month_pattern = re.escape(params['month'])
-        query['month'] = { '$regex': f'^{month_pattern}', '$options': 'i' }
-
-    if params.get('year'):
-        query['year'] = int(params['year'])
+        query['month'] = {'$regex': f'^{month_pattern}', '$options': 'i'}
 
     page = max(int(params.get('page', 1)), 1)
     size = max(int(params.get('pageSize', 10)), 1)
 
     total = db.payslips.count_documents(query)
+
+    # sort by generateAt descending (newest first), then paginate
     cursor = (
         db.payslips
           .find(query, {'_id': 0})
+          .sort('generateAt', -1)
           .skip((page - 1) * size)
           .limit(size)
     )
+
     payslips = [
-        { **p, 'download_link': f"/download/{p['payslipId']}" }
+        {**p, 'download_link': f"/download/{p['payslipId']}"}
         for p in cursor
     ]
 
