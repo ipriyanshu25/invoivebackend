@@ -235,21 +235,41 @@ def get_salary_slip():
                      download_name=f"salary_slip_{emp_id}.pdf")
 
 
+import math
+import re
+from flask import request
+
 @employee_bp.route('/getpayslips', methods=['POST'])
 def get_payslips():
     params = request.get_json(force=True) or {}
     query = {}
+
     if params.get('search'):
         query['$text'] = {'$search': params['search']}
+
     if params.get('month'):
-        query['month'] = params['month']
+        # build a case-insensitive regex so "May", "may", or even partials like "Ma" match
+        month_pattern = re.escape(params['month'])
+        query['month'] = { '$regex': f'^{month_pattern}', '$options': 'i' }
+
     if params.get('year'):
         query['year'] = int(params['year'])
+
     page = max(int(params.get('page', 1)), 1)
     size = max(int(params.get('pageSize', 10)), 1)
+
     total = db.payslips.count_documents(query)
-    cursor = db.payslips.find(query, {'_id': 0}).skip((page-1)*size).limit(size)
-    payslips = [{**p, 'download_link': f"/download/{p['payslipId']}"} for p in cursor]
+    cursor = (
+        db.payslips
+          .find(query, {'_id': 0})
+          .skip((page - 1) * size)
+          .limit(size)
+    )
+    payslips = [
+        { **p, 'download_link': f"/download/{p['payslipId']}" }
+        for p in cursor
+    ]
+
     if not payslips:
         return format_response(True, "No payslips found", {
             'payslips': [],
@@ -259,10 +279,16 @@ def get_payslips():
                 'totalPages': 0
             }
         }, status=200)
+
     return format_response(True, "Payslips retrieved successfully", {
         'payslips': payslips,
-        'pagination': { 'totalRecords': total, 'currentPage': page, 'totalPages': math.ceil(total/size) }
+        'pagination': {
+            'totalRecords': total,
+            'currentPage': page,
+            'totalPages': math.ceil(total / size)
+        }
     }, status=200)
+
 
 @employee_bp.route('/viewpdf/<payslip_id>', methods=['GET'])
 def view_payslip_pdf(payslip_id):
