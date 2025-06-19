@@ -14,7 +14,7 @@ def addKpi():
     project_name = data.get('projectName')
     due_date_str = data.get('duedate')
     submitted_date_str = data.get('submittedDate')
-    remark = data.get('Remark/comment') or data.get('Remark') or data.get('comment')
+    remark = data.get('Remark') or data.get('Remark')
     points = data.get('points')
 
     # Validate required fields
@@ -69,12 +69,24 @@ def updateKpi():
     if not updates:
         return format_response(False, "No fields to update", None, 400)
 
+    # Perform update
     result = db.kpi.update_one({'kpiId': kpi_id}, {'$set': updates})
     if result.matched_count == 0:
         return format_response(False, "KPI not found", None, 404)
 
-    return format_response(True, "KPI updated", None, 200)
-
+    # Fetch updated KPI
+    kpi = db.kpi.find_one({'kpiId': kpi_id})
+    data = {
+        'kpiId': kpi.get('kpiId'),
+        'employeeId': kpi.get('employeeId'),
+        'employeeName': kpi.get('employeeName'),
+        'projectName': kpi.get('project_name'),
+        'duedate': kpi.get('due_date').strftime('%Y-%m-%d'),
+        'submittedDate': kpi.get('submitted_date').strftime('%Y-%m-%d'),
+        'Remark': kpi.get('remark'),
+        'points': kpi.get('points')
+    }
+    return format_response(True, "KPI updated", data, 200)
 @kpi_bp.route('/getByKpiId/<kpi_id>', methods=['GET'])
 def getByKpiId(kpi_id):
     kpi = db.kpi.find_one({'kpiId': kpi_id})
@@ -88,7 +100,7 @@ def getByKpiId(kpi_id):
         'projectName': kpi.get('project_name'),
         'duedate': kpi.get('due_date').strftime('%Y-%m-%d'),
         'submittedDate': kpi.get('submitted_date').strftime('%Y-%m-%d'),
-        'Remark/comment': kpi.get('remark'),
+        'Remark': kpi.get('remark'),
         'points': kpi.get('points')
     }
     return format_response(True, "KPI retrieved", data, 200)
@@ -125,7 +137,7 @@ def getAll():
             'projectName': kpi.get('project_name'),
             'duedate': kpi.get('due_date').strftime('%Y-%m-%d'),
             'submittedDate': kpi.get('submitted_date').strftime('%Y-%m-%d'),
-            'Remark/comment': kpi.get('remark'),
+            'Remark': kpi.get('remark'),
             'points': kpi.get('points')
         })
 
@@ -137,6 +149,15 @@ def getAll():
     }
     return format_response(True, "KPIs retrieved", response_data, 200)
 
-# Register this blueprint in your app.py:
-# from kpi import kpi_bp
-# app.register_blueprint(kpi_bp)
+@kpi_bp.route('/deleteKpi', methods=['POST'])
+def deleteKpi():
+    data = request.get_json() or {}
+    kpi_id = data.get('kpiId')
+    if not kpi_id:
+        return format_response(False, "Missing KPI ID", None, 400)
+
+    result = db.kpi.delete_one({'kpiId': kpi_id})
+    if result.deleted_count == 0:
+        return format_response(False, "KPI not found", None, 404)
+
+    return format_response(True, "KPI deleted successfully", None, 200)
