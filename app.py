@@ -8,6 +8,7 @@ from invoiceMHD import invoice_bp
 from invoiceEnoylity import invoice_enoylity_bp
 from invoiceEnoylityLLC import enoylity_bp
 from settings import settings_bp
+from kpi import kpi_bp
 
 
 
@@ -24,6 +25,7 @@ app.register_blueprint(invoice_bp)
 app.register_blueprint(invoice_enoylity_bp)
 app.register_blueprint(enoylity_bp)
 app.register_blueprint(settings_bp)
+app.register_blueprint(kpi_bp)
 
 
 
