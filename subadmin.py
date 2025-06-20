@@ -10,16 +10,19 @@ subadmin_bp = Blueprint('subadmin', __name__, url_prefix='/subadmin')
 
 # Permission mapping: JSON field -> human-readable
 PERMISSIONS = {
-    'View payslip details': 'View payslip details',
-    'Generate payslip': 'Generate payslip',
-    'View Invoice details': 'View Invoice details',
-    'Generate invoice details': 'Generate invoice details',
-    'Add Employee Details': 'Add Employee details',
-    'View Employee Details': 'View employee details',
+    'View payslip details':         'View payslip details',
+    'Generate payslip':             'Generate payslip',
+    'View Invoice details':         'View Invoice details',
+    'Generate invoice details':     'Generate invoice details',
+    'Add Employee Details':         'Add Employee details',
+    'View Employee Details':        'View employee details',
+    'Manage KPI':                   'Manage KPI',             # <<-- added here
 }
 
 # Password complexity: uppercase, lowercase, digit, special char, min length 8
-PASSWORD_REGEX = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$')
+PASSWORD_REGEX = re.compile(
+    r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$'
+)
 
 
 @subadmin_bp.route('/register', methods=['POST'])
@@ -33,33 +36,49 @@ def register_subadmin():
         perms       = data.get('permissions', {})
 
         if not all([admin_id, employee_id, username, password]):
-            return format_response(False,
-                                   'Missing required fields: adminid, employeeid, username, or password',
-                                   status=400)
+            return format_response(
+                False,
+                'Missing required fields: adminid, employeeid, username, or password',
+                status=400
+            )
 
+        # verify admin exists
         if not db.admin.find_one({'adminId': admin_id}):
             return format_response(False, 'Invalid adminId', status=403)
 
+        # password complexity
         if not PASSWORD_REGEX.match(password):
-            return format_response(False,
-                                   'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
-                                   status=400)
+            return format_response(
+                False,
+                'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
+                status=400
+            )
 
+        # verify employee exists
         if not db.employees.find_one({'employeeId': employee_id}):
             return format_response(False, 'No such employee', status=404)
 
+        # ensure no existing subadmin for this employee
         if db.subadmin.find_one({'employeeId': employee_id}):
-            return format_response(False,
-                                   'Subadmin credentials already exist for this employee, please login',
-                                   status=409)
+            return format_response(
+                False,
+                'Subadmin credentials already exist for this employee, please login',
+                status=409
+            )
 
+        # ensure unique username
         if db.subadmin.find_one({'username': username}):
             return format_response(False, 'Username already taken', status=409)
 
+        # hash password and build permissions flags
         pw_hash = generate_password_hash(password)
-        permission_flags = { key: int(bool(perms.get(key))) for key in PERMISSIONS.keys() }
+        permission_flags = {
+            key: int(bool(perms.get(key)))
+            for key in PERMISSIONS.keys()
+        }
         subadmin_id = str(uuid.uuid4())
 
+        # insert record
         db.subadmin.insert_one({
             'subadminId': subadmin_id,
             'employeeId': employee_id,
@@ -68,9 +87,11 @@ def register_subadmin():
             'permissions': permission_flags
         })
 
-        return format_response(True,
-                               'Subadmin registered successfully',
-                               data={'subadminId': subadmin_id})
+        return format_response(
+            True,
+            'Subadmin registered successfully',
+            data={'subadminId': subadmin_id}
+        )
 
     except Exception:
         return format_response(False, 'Internal server error', status=500)
@@ -81,7 +102,7 @@ def update_subadmin():
     try:
         data = request.get_json() or {}
         subadmin_id = data.get('subadminId')
-        updates = data.get('updates', {})
+        updates     = data.get('updates', {})
 
         if not subadmin_id:
             return format_response(False, 'subadminId is required', status=400)
@@ -92,28 +113,42 @@ def update_subadmin():
 
         update_fields = {}
 
+        # username change
         if 'username' in updates:
             new_username = updates['username']
-            if db.subadmin.find_one({'username': new_username, 'subadminId': {'$ne': subadmin_id}}):
+            if db.subadmin.find_one({
+                'username': new_username,
+                'subadminId': {'$ne': subadmin_id}
+            }):
                 return format_response(False, 'Username already in use', status=409)
             update_fields['username'] = new_username
 
+        # password change
         if 'password' in updates:
             new_password = updates['password']
             if not PASSWORD_REGEX.match(new_password):
-                return format_response(False,
-                                       'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
-                                       status=400)
+                return format_response(
+                    False,
+                    'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
+                    status=400
+                )
             update_fields['password_hash'] = generate_password_hash(new_password)
 
+        # permissions update (including "Manage KPI")
         if 'permissions' in updates:
             perms = updates['permissions']
-            update_fields['permissions'] = { key: int(bool(perms.get(key))) for key in PERMISSIONS.keys() }
+            update_fields['permissions'] = {
+                key: int(bool(perms.get(key)))
+                for key in PERMISSIONS.keys()
+            }
 
         if not update_fields:
             return format_response(False, 'No valid fields to update', status=400)
 
-        db.subadmin.update_one({'subadminId': subadmin_id}, {'$set': update_fields})
+        db.subadmin.update_one(
+            {'subadminId': subadmin_id},
+            {'$set': update_fields}
+        )
         return format_response(True, 'Subadmin updated successfully')
 
     except Exception:
@@ -143,31 +178,38 @@ def delete_subadmin():
 def get_subadmin_list():
     try:
         data = request.get_json() or {}
-        page = int(data.get('page', 1))
+        page      = int(data.get('page', 1))
         page_size = int(data.get('pageSize', 10))
-        search = (data.get('search') or '').strip()
+        search    = (data.get('search') or '').strip()
 
         query = {}
         if search:
             query['$or'] = [
-                {'username': {'$regex': search, '$options': 'i'}},
+                {'username':   {'$regex': search, '$options': 'i'}},
                 {'employeeId': {'$regex': search, '$options': 'i'}}
             ]
 
         total = db.subadmin.count_documents(query)
         subadmins = list(
-            db.subadmin.find(query, {'_id': 0, 'password_hash': 0})
-                       .skip((page - 1) * page_size)
-                       .limit(page_size)
+            db.subadmin.find(
+                query,
+                {'_id': 0, 'password_hash': 0}
+            )
+            .skip((page - 1) * page_size)
+            .limit(page_size)
         )
 
         payload = {
             'subadmins': subadmins,
-            'total': total,
-            'page': page,
-            'pageSize': page_size
+            'total':     total,
+            'page':      page,
+            'pageSize':  page_size
         }
-        return format_response(True, 'Subadmin list retrieved successfully', data=payload)
+        return format_response(
+            True,
+            'Subadmin list retrieved successfully',
+            data=payload
+        )
 
     except Exception:
         return format_response(False, 'Internal server error', status=500)
@@ -176,7 +218,7 @@ def get_subadmin_list():
 @subadmin_bp.route('/login', methods=['POST'])
 def login_subadmin():
     try:
-        data = request.get_json() or {}
+        data     = request.get_json() or {}
         username = data.get('username')
         password = data.get('password')
 
@@ -188,7 +230,7 @@ def login_subadmin():
             return format_response(False, 'Invalid credentials', status=401)
 
         resp = {
-            'role': 'subadmin',
+            'role':        'subadmin',
             'permissions': user.get('permissions', {})
         }
         return format_response(True, 'Login successful', data=resp)
