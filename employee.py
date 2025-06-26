@@ -334,3 +334,80 @@ allowance_names = [
     "Performance Bonus", "Overtime Bonus", "Special Allowance"
 ]
 
+
+
+@employee_bp.route('/updateSalarySlip', methods=['POST'])
+def update_salary_slip():
+    data = request.get_json(force=True) or {}
+    payslip_id = data.get('payslipId')
+    if not payslip_id:
+        return format_response(False, "payslipId is required", None, 400)
+
+    # 1) Fetch existing payslip
+    payslip = db.payslips.find_one({"payslipId": payslip_id})
+    if not payslip:
+        return format_response(False, "Payslip not found", None, 404)
+
+    updates = {}
+    now = datetime.utcnow()
+
+    # 2) Update salary_structure if provided
+    if 'salary_structure' in data:
+        incoming = data['salary_structure']
+        final_struct = []
+        for item in incoming:
+            name = item.get('name')
+            try:
+                amt = float(item.get('amount', 0))
+            except (TypeError, ValueError):
+                return format_response(False, f"Invalid amount for {name}", None, 400)
+            final_struct.append({"name": name, "amount": amt})
+        updates['salary_structure'] = final_struct
+        updates['emp_snapshot.salary_structure'] = final_struct
+
+    # 3) Update lop_days if provided
+    if 'lop_days' in data:
+        try:
+            lop = float(data['lop_days'])
+        except (TypeError, ValueError):
+            return format_response(False, "lop_days must be a number", None, 400)
+        updates['lop_days'] = lop
+        updates['emp_snapshot.lop'] = lop
+
+    # 4) Update TDS override if provided
+    if 'Tax Deduction at Source (TDS)' in data:
+        try:
+            tds = float(data['Tax Deduction at Source (TDS)'])
+        except (TypeError, ValueError):
+            return format_response(False, "TDS must be a number", None, 400)
+        updates['emp_snapshot.Tax Deduction at Source (TDS)'] = tds
+
+    if not updates:
+        return format_response(False, "No fields provided for update", None, 400)
+
+    # 5) Stamp update time
+    updates['updated_on'] = now
+
+    # 6) Persist changes
+    db.payslips.update_one(
+        {'payslipId': payslip_id},
+        {'$set': updates}
+    )
+
+    # 7) Reload the updated payslip
+    payslip = db.payslips.find_one({"payslipId": payslip_id})
+    emp_snapshot = payslip.get('emp_snapshot', {})
+    generated_on = payslip.get('generated_on') or now
+    date_str = generated_on.strftime("%d-%m-%Y")
+
+    # 8) Generate new PDF
+    generator = SalarySlipGenerator(emp_snapshot, current_date=date_str)
+    pdf_buf = generator.generate_pdf()
+
+    # 9) Return PDF as download
+    return send_file(
+        pdf_buf,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=payslip.get('filename', f"salary_slip_{payslip['employeeId']}.pdf")
+    )

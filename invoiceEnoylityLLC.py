@@ -211,28 +211,36 @@ def generate_invoice_endpoint():
 @enoylity_bp.route('/getlist', methods=['POST'])
 def list_invoices():
     try:
-        # 1️⃣ Parse pagination params
         data = request.get_json() or {}
+        # Pagination params
         page      = max(int(data.get('page', 1)), 1)
         page_size = max(int(data.get('page_size', 10)), 1)
         skip      = (page - 1) * page_size
 
-        # 2️⃣ Build your query (here we list all; you could add filters)
+        # Build base query
         query = {}
+        # Apply search on invoice_number and bill_to.name if provided
+        search_term = data.get('search', '').strip()
+        if search_term:
+            regex = {'$regex': search_term, '$options': 'i'}
+            query['$or'] = [
+                {'invoice_number': regex},
+                {'bill_to.name': regex}
+            ]
 
-        # 3️⃣ Count total docs
+        # Count total matching docs
         total = db.invoiceEnoylityLLC.count_documents(query)
 
-        # 4️⃣ Fetch paginated slice, sorted newest first
+        # Fetch paginated results, sorted newest first
         cursor = (
             db.invoiceEnoylityLLC
-            .find(query)
-            .sort('created_at', -1)
-            .skip(skip)
-            .limit(page_size)
+              .find(query)
+              .sort('created_at', -1)
+              .skip(skip)
+              .limit(page_size)
         )
 
-        # 5️⃣ Serialize results
+        # Serialize results
         invoices = []
         for doc in cursor:
             invoices.append({
@@ -248,24 +256,24 @@ def list_invoices():
                 'created_at':        doc['created_at'].strftime('%Y-%m-%dT%H:%M:%SZ')
             })
 
-        # 6️⃣ Build pagination metadata
+        # Compute total pages
         total_pages = (total + page_size - 1) // page_size
 
         return format_response(
             True,
             "Invoices retrieved",
             {
-                'invoices':   invoices,
-                'page':       page,
-                'page_size':  page_size,
-                'total':      total,
+                'invoices':    invoices,
+                'page':        page,
+                'page_size':   page_size,
+                'total':       total,
                 'total_pages': total_pages
             }
         )
-
     except Exception as e:
-        logging.exception("Error listing invoices")
+        logging.exception("Error listing invoices with search")
         return format_response(False, "Internal server error"), 500
+
 
 @enoylity_bp.route('/getinvoice', methods=['POST'])
 def get_invoice_details():
