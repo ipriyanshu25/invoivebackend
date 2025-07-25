@@ -34,12 +34,11 @@ DEFAULT_SETTINGS = {
     "company_info": {
         "name":       "MHD Tech",
         "address":    "8825 Perimeter Park Blvd Ste 501",
-        "city_state": "Jnnacksonville, Florida, USA",
+        "city_state": "Jacksonville, Florida, USA",
         "phone":      "+15075561971",
         "youtube":    "youtube.com/@mhd_tech",
         "email":      "aria@mhdtechpro.com"
     },
-    # ← NEW
     "paypal_details": {
         "receiver_email": "support@enoylity.com",
         "paypal_name":    "Enoylity Media Creation"
@@ -52,7 +51,6 @@ DEFAULT_SETTINGS = {
         "bank_address":   "210 E Main St, Rogersville TN 37857"
     }
 }
-
 
 # PDF generator using dynamic settings
 class InvoicePDF(FPDF):
@@ -78,6 +76,7 @@ class InvoicePDF(FPDF):
         self.cell(0, 6, ci.get('youtube', ''), ln=1)
         self.cell(0, 6, ci['email'], ln=1)
         self.ln(12)
+
 # Invoice number generator
 def get_next_invoice_number():
     counter = db.invoice_counters.find_one_and_update(
@@ -95,7 +94,7 @@ def generate_invoice_endpoint():
         # 1️⃣ Fetch editable fields for the "MHD" invoice type
         raw = db.settings_invoice.find_one({"invoice_type": "MHD Tech"}) or {}
         editable = raw.get("editable_fields", {})
-        print(editable)
+
         # 2️⃣ Merge into defaults (without mutating them)
         import copy
         settings = copy.deepcopy(DEFAULT_SETTINGS)
@@ -119,23 +118,22 @@ def generate_invoice_endpoint():
             "invoice_date":     "Invoice date is required",
             "due_date":         "Due date is required"
         }
-
         for field, error_msg in required_fields.items():
             if not data.get(field):
                 return format_response(False, error_msg, status=400)
 
-
         # 5️⃣ Parse fields
-        bt_name = data['bill_to_name']
-        bt_addr = data['bill_to_address']
-        bt_mail = data['bill_to_email']
-        bt_phone = data['bill_to_phone']
-        note    = data['notes']
-        bank_note = data['bank_Note']
-        items   = data.get('items', [])
-        payment_method = int(data.get('payment_method', None))
+        bt_name        = data['bill_to_name']
+        bt_addr        = data['bill_to_address']
+        bt_mail        = data['bill_to_email']
+        bt_phone       = data.get('bill_to_phone', '')
+        note           = data.get('notes', '')
+        bank_note      = data.get('bank_Note', '')
+        items          = data.get('items', [])
+        payment_method = int(data.get('payment_method', 0))
 
         inv_no = get_next_invoice_number()
+
         # Validate dates
         try:
             datetime.strptime(data['invoice_date'], '%d-%m-%Y')
@@ -218,18 +216,17 @@ def generate_invoice_endpoint():
             pdf.cell(45,8,f'$ {fee:.2f}',0,1,'C')
         else:
             total = subtotal
+
         pdf.ln(8)
         pdf.set_font('Lexend','B',14)
         pdf.cell(135,8,'TOTAL ',0,0,'R')
         pdf.cell(39,8,f'USD $ {total:.2f}',0,1,'C')
-
         pdf.ln(12)
 
+        # Layout for payment details and notes
         full_w = pdf.w - pdf.l_margin - pdf.r_margin
-        note_w = 80  # REDUCED width for your Notes column (to push it more to the right)
-        left_w = full_w - note_w - 20  # Added 20 points of extra space between columns
-
-        # Remember current Y
+        note_w = 80
+        left_w = full_w - note_w - 20
         y0 = pdf.get_y()
 
         # Left column: Bank or PayPal Details
@@ -237,21 +234,13 @@ def generate_invoice_endpoint():
         pdf.set_font('Lexend', 'B', 12)
         if payment_method == 0:
             pdf.cell(left_w, 6, 'PayPal Details:', 0)
-            
-            # Right column: Notes heading (on the same line as PayPal Details) - moved further right
             if note:
                 pdf.set_xy(pdf.l_margin + left_w + 20, y0)
                 pdf.cell(note_w, 6, 'Note:', 0, 1)
-
-                # Content under “Note:”
                 pdf.set_xy(pdf.l_margin + left_w + 20, y0 + 6)
                 pdf.set_font('Lexend', '', 11)
                 pdf.multi_cell(note_w, 5, note, 0)
 
-
-
-                
-            # Continue with PayPal details
             pdf.set_xy(pdf.l_margin, y0 + 6)
             pd = settings['paypal_details']
             pdf.set_font('Lexend', '', 11)
@@ -260,18 +249,13 @@ def generate_invoice_endpoint():
 
         elif payment_method == 1:
             pdf.cell(left_w, 6, 'Bank Details:', 0)
-            
-            # Right column: Notes heading (on the same line as Bank Details) - moved further right
             if note:
                 pdf.set_xy(pdf.l_margin + left_w + 20, y0)
                 pdf.cell(note_w, 6, 'Note:', 0, 1)
-
-                # Content under “Note:”
                 pdf.set_xy(pdf.l_margin + left_w + 20, y0 + 6)
                 pdf.set_font('Lexend', '', 11)
                 pdf.multi_cell(note_w, 5, note, 0)
 
-            # Continue with Bank details
             pdf.set_xy(pdf.l_margin, y0 + 6)
             bd = settings['bank_details']
             pdf.set_font('Lexend', '', 11)
@@ -281,34 +265,23 @@ def generate_invoice_endpoint():
             pdf.cell(left_w, 5, f"Bank Name     : {bd.get('bank_name','')}", ln=1)
             pdf.cell(left_w, 5, f"Bank Address  : {bd.get('bank_address','')}", ln=1)
 
-
-
             if bank_note:
-                # move down a bit below bank details
                 start_y = pdf.get_y() + 6
                 pdf.set_xy(pdf.l_margin, start_y)
-
-                # Bank Note heading
                 pdf.set_font('Lexend', 'B', 11)
                 pdf.cell(note_w, 6, 'Bank Note:', 0, 1)
-
-                # Bank Note content
                 pdf.set_font('Lexend', '', 11)
                 pdf.multi_cell(note_w, 5, bank_note, 0)
-
         else:
             if note:
                 pdf.set_xy(pdf.l_margin, y0)
                 pdf.cell(note_w, 6, 'Note:', 0, 1)
-                # Notes content - positioned at right column, under "Note:" heading
-                notes_x = pdf.l_margin  # Added 20 points of space
-                notes_y = y0 + 6  # Start notes content below the heading
-                pdf.set_xy(notes_x, notes_y)
+                pdf.set_xy(pdf.l_margin, y0 + 6)
                 pdf.set_font('Lexend', '', 11)
-                pdf.multi_cell(note_w, 5, note, 0)  # Default left alignment
-                pass
+                pdf.multi_cell(note_w, 5, note, 0)
 
-        # Save record
+        # Save record with createdAt timestamp
+        created_at = datetime.utcnow()
         db.invoiceMHD.insert_one({
             'invoice_number': inv_no,
             'bill_to': {
@@ -321,9 +294,10 @@ def generate_invoice_endpoint():
             'invoice_date': data['invoice_date'],
             'due_date': data['due_date'],
             'notes': note,
-            'bank_Note':bank_note,
+            'bank_Note': bank_note,
             'total_amount': total,
-            'payment_method': payment_method
+            'payment_method': payment_method,
+            'createdAt': created_at
         })
 
         # Stream PDF back to client
@@ -360,9 +334,21 @@ def get_invoice_list():
             ]}
 
         skip    = (page - 1) * per_page
-        cursor  = db.invoiceMHD.find(criteria).skip(skip).limit(per_page)
-        invoices = [{**inv, '_id': str(inv['_id'])} for inv in cursor]
-        total    = db.invoiceMHD.count_documents(criteria)
+        cursor  = (
+            db.invoiceMHD
+              .find(criteria)
+              .sort('createdAt', -1)
+              .skip(skip)
+              .limit(per_page)
+        )
+        invoices = []
+        for inv in cursor:
+            inv['_id'] = str(inv['_id'])
+            # optionally include ISO timestamp:
+            inv['createdAt'] = inv['createdAt'].isoformat()
+            invoices.append(inv)
+
+        total = db.invoiceMHD.count_documents(criteria)
 
         return format_response(
             True,
@@ -376,8 +362,6 @@ def get_invoice_list():
         )
     except Exception:
         return format_response(False, 'Internal server error', status=500)
-
-
 
 
 @invoice_bp.route('/getinvoice', methods=['POST'])
@@ -401,15 +385,16 @@ def get_invoice_by_id():
 
         # 3️⃣ Build response payload (convert ObjectId -> str)
         payload = {
-            '_id':        str(doc['_id']),
+            '_id':           str(doc['_id']),
             'invoice_number': doc.get('invoice_number'),
-            'bill_to':    doc.get('bill_to', {}),
-            'items':      doc.get('items', []),
-            'invoice_date':   doc.get('invoice_date'),
-            'due_date':       doc.get('due_date'),
-            'notes':      doc.get('notes', ''),
-            'total_amount':   doc.get('total_amount', 0),
-            'payment_method': doc.get('payment_method', 0)
+            'bill_to':       doc.get('bill_to', {}),
+            'items':         doc.get('items', []),
+            'invoice_date':  doc.get('invoice_date'),
+            'due_date':      doc.get('due_date'),
+            'notes':         doc.get('notes', ''),
+            'total_amount':  doc.get('total_amount', 0),
+            'payment_method':doc.get('payment_method', 0),
+            'createdAt':     doc.get('createdAt').isoformat() if doc.get('createdAt') else None
         }
 
         return format_response(True, "Invoice retrieved", payload)
