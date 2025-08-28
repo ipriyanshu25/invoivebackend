@@ -148,19 +148,22 @@ def generate_invoice_endpoint():
         pdf.due_date       = data['due_date']
         pdf.add_page()
 
-        # Bill To block
-        lines = ["Bill To:"] + [bt_name, bt_addr, bt_phone, bt_mail]
-        heights = [8] + [6]*(len(lines)-1)
+        # ─────────────────────────────────────────────
+        # Bill To block (WRAPPED; avoids overflow)
+        # ─────────────────────────────────────────────
         block_w = pdf.w - pdf.l_margin - pdf.r_margin
-        x, y = pdf.get_x(), pdf.get_y()
         pdf.set_fill_color(*settings['colors']['light_pink'])
-        pdf.rect(x, y, block_w, sum(heights), 'F')
         pdf.set_text_color(*settings['colors']['black'])
-        for h, txt, style in zip(heights, lines, ['B'] + ['']*(len(lines)-1)):
-            pdf.set_font('Lexend', style, 12 if style=='B' else 11)
-            pdf.set_xy(x, y)
-            pdf.cell(0, h, txt, ln=1)
-            y += h
+
+        # Header line
+        pdf.set_font('Lexend', 'B', 12)
+        pdf.multi_cell(block_w, 8, 'Bill To:', border=0, align='L', fill=True)
+
+        # Content lines (skip empties), wrapped under the same background
+        pdf.set_font('Lexend', '', 11)
+        info_lines = [bt_name, bt_addr, bt_phone, bt_mail]
+        info_text = "\n".join([s for s in info_lines if s])
+        pdf.multi_cell(block_w, 6, info_text, border=0, align='L', fill=True)
         pdf.ln(4)
 
         # Invoice Details block
@@ -173,6 +176,7 @@ def generate_invoice_endpoint():
         d_heights = [8] + [7]*(len(details)-1)
         x, y = pdf.get_x(), pdf.get_y()
         pdf.set_fill_color(*settings['colors']['light_pink'])
+        block_w = pdf.w - pdf.l_margin - pdf.r_margin
         pdf.rect(x, y, block_w, sum(d_heights), 'F')
         pdf.set_text_color(*settings['colors']['black'])
         for h, txt, style in zip(d_heights, details, ['B'] + ['']*(len(details)-1)):
@@ -297,7 +301,7 @@ def generate_invoice_endpoint():
             'bank_Note': bank_note,
             'total_amount': total,
             'payment_method': payment_method,
-            'createdAt': created_at
+            'createdAt': created_at,   # ✅ now stored
         })
 
         # Stream PDF back to client
@@ -318,11 +322,12 @@ def generate_invoice_endpoint():
 @invoice_bp.route('/getlist', methods=['POST'])
 def get_invoice_list():
     try:
-        data = request.get_json() or {}
-        page     = int(data.get('page', 1))
-        per_page = int(data.get('per_page', 10))
-        search   = (data.get('search') or '').strip()
+        data      = request.get_json() or {}
+        page      = int(data.get('page', 1))
+        per_page  = int(data.get('per_page', 10))
+        search    = (data.get('search') or '').strip()
 
+        # Build search criteria
         criteria = {}
         if search:
             regex = {'$regex': search, '$options': 'i'}
@@ -333,19 +338,19 @@ def get_invoice_list():
                 {'due_date':      regex}
             ]}
 
-        skip    = (page - 1) * per_page
-        cursor  = (
+        skip = (page - 1) * per_page
+        cursor = (
             db.invoiceMHD
               .find(criteria)
-              .sort('createdAt', -1)
+              .sort('invoice_date', -1)   # newest first
               .skip(skip)
               .limit(per_page)
         )
+
         invoices = []
         for inv in cursor:
-            inv['_id'] = str(inv['_id'])
-            # optionally include ISO timestamp:
-            inv['createdAt'] = inv['createdAt'].isoformat()
+            inv['_id'] = str(inv['_id'])                 # jsonify ObjectId
+            # remove createdAt handling
             invoices.append(inv)
 
         total = db.invoiceMHD.count_documents(criteria)
@@ -354,13 +359,14 @@ def get_invoice_list():
             True,
             'Invoice list retrieved',
             data={
-                'invoices': invoices,
-                'total': total,
-                'page': page,
-                'per_page': per_page
+                'invoices':  invoices,
+                'total':     total,
+                'page':      page,
+                'per_page':  per_page
             }
         )
     except Exception:
+        # log the exception here if you have logging set up
         return format_response(False, 'Internal server error', status=500)
 
 
@@ -385,16 +391,16 @@ def get_invoice_by_id():
 
         # 3️⃣ Build response payload (convert ObjectId -> str)
         payload = {
-            '_id':           str(doc['_id']),
+            '_id':            str(doc['_id']),
             'invoice_number': doc.get('invoice_number'),
-            'bill_to':       doc.get('bill_to', {}),
-            'items':         doc.get('items', []),
-            'invoice_date':  doc.get('invoice_date'),
-            'due_date':      doc.get('due_date'),
-            'notes':         doc.get('notes', ''),
-            'total_amount':  doc.get('total_amount', 0),
-            'payment_method':doc.get('payment_method', 0),
-            'createdAt':     doc.get('createdAt').isoformat() if doc.get('createdAt') else None
+            'bill_to':        doc.get('bill_to', {}),
+            'items':          doc.get('items', []),
+            'invoice_date':   doc.get('invoice_date'),
+            'due_date':       doc.get('due_date'),
+            'notes':          doc.get('notes', ''),
+            'total_amount':   doc.get('total_amount', 0),
+            'payment_method': doc.get('payment_method', 0),
+            'createdAt':      doc.get('createdAt').isoformat() if doc.get('createdAt') else None
         }
 
         return format_response(True, "Invoice retrieved", payload)
