@@ -6,6 +6,30 @@ import uuid
 
 kpi_bp = Blueprint('kpi', __name__, url_prefix='/kpi')
 
+def _coerce_quality_point(raw):
+    """
+    Accept -1 or 1 (int or string). Also accept 'negative'/'positive' etc.
+    """
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in {"-1", "neg", "negative", "minus", "bad"}:
+            return -1
+        if s in {"1", "pos", "positive", "plus", "good"}:
+            return 1
+        try:
+            val = int(s)
+        except Exception:
+            raise ValueError("qualityPoint must be -1 or 1")
+    else:
+        try:
+            val = int(raw)
+        except Exception:
+            raise ValueError("qualityPoint must be -1 or 1")
+
+    if val not in (-1, 1):
+        raise ValueError("qualityPoint must be -1 or 1")
+    return val
+
 def _parse_date(s, field_name):
     try:
         return datetime.strptime(s, '%Y-%m-%d')
@@ -158,9 +182,13 @@ def getAll():
     # Build search filter
     query = {}
     if (s := (data.get('search') or '').strip()):
-        query['project_name'] = {'$regex': s, '$options': 'i'}
+        rx = {'$regex': s, '$options': 'i'}
+        query['$or'] = [
+            {'project_name': rx},
+            {'employeeName': rx},
+        ]
 
-    # Optional date-range filter on startdate
+    # Optional date-range filter on startdate (inclusive)
     sd = data.get('startDate')
     ed = data.get('endDate')
     if sd and ed:
@@ -171,34 +199,51 @@ def getAll():
             return format_response(False, "startDate/endDate must be YYYY-MM-DD", None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
 
-    # Count + pagination
-    total = db.kpi.count_documents(query)
-    skip  = (page - 1) * page_size
+    # Optional employeeIds filter (accept list OR single string)
+    # also accept legacy/misspelled key 'employesids'
+    employee_ids_raw = data.get('employeeIds', data.get('employesids'))
+    employee_ids: list[str] = []
+    if isinstance(employee_ids_raw, str) and employee_ids_raw.strip():
+        employee_ids = [employee_ids_raw.strip()]
+    elif isinstance(employee_ids_raw, list):
+        employee_ids = [str(e).strip() for e in employee_ids_raw if str(e).strip()]
 
-    # **Always sort by createdAt descending**
+    if employee_ids:
+        query['employeeId'] = {'$in': employee_ids}
+
+    # Count after full query is built
+    total = db.kpi.count_documents(query)
+
+    # Pagination window
+    skip = (page - 1) * page_size
+    if skip < 0:
+        skip = 0
+
+    # Sorting (keep original behavior)
+    sort_field = 'createdAt'
+    sort_dir = -1
+
     cursor = (
         db.kpi
           .find(query)
-          .sort('createdAt', -1)
+          .sort(sort_field, sort_dir)
           .skip(skip)
           .limit(page_size)
     )
 
     kpis = []
     for k in cursor:
-        # Format punches
         punches = []
         for p in k.get('punches', []):
             pd = p.get('punchDate')
             punches.append({
-                'punchDate'  : pd.strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else None,
-                'remark'     : p.get('remark'),
-                'status'     : p.get('status')
+                'punchDate': pd.strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else (pd or None),
+                'remark'   : p.get('remark'),
+                'status'   : p.get('status')
             })
 
-        # Safe date formatting helper
         def fmt(dt, f='%Y-%m-%d'):
-            return dt.strftime(f) if hasattr(dt, 'strftime') else None
+            return dt.strftime(f) if hasattr(dt, 'strftime') else (dt if isinstance(dt, str) else None)
 
         kpis.append({
             'kpiId'       : k.get('kpiId'),
@@ -209,18 +254,18 @@ def getAll():
             'deadline'    : fmt(k.get('deadline')),
             'Remark'      : k.get('remark'),
             'points'      : k.get('points'),
-            'createdAt'   : k.get('createdAt').isoformat() if hasattr(k.get('createdAt'), 'isoformat') else None,
-            'updatedAt'   : k.get('updatedAt').isoformat() if hasattr(k.get('updatedAt'), 'isoformat') else None,
+            'qualityPoints': k.get('qualityPoints'),   # <— ADD THIS
+            'createdAt'   : k.get('createdAt').isoformat() if hasattr(k.get('createdAt'), 'isoformat') else (k.get('createdAt') or None),
+            'updatedAt'   : k.get('updatedAt').isoformat() if hasattr(k.get('updatedAt'), 'isoformat') else (k.get('updatedAt') or None),
             'punches'     : punches
         })
 
     return format_response(True, "KPIs retrieved", {
-        'page'     : page,
-        'pageSize' : page_size,
-        'total'    : total,
-        'kpis'     : kpis
+        'page'    : page,
+        'pageSize': page_size,
+        'total'   : total,
+        'kpis'    : kpis
     }, 200)
-
 
 
 @kpi_bp.route('/deleteKpi', methods=['POST'])
@@ -326,6 +371,7 @@ def getByEmployeeId():
             'deadline'    : fmt(kpi.get('deadline')),
             'Remark'      : kpi.get('remark'),
             'points'      : kpi.get('points'),
+            'qualityPoints': kpi.get('qualityPoints'),  # <— ADD THIS
             'createdAt'   : created_str,
             'updatedAt'   : updated_str,
             'punches'     : punches_list
@@ -342,3 +388,32 @@ def getByEmployeeId():
         },
         200
     )
+
+
+@kpi_bp.route('/setQualityPoint', methods=['POST'])    # alias for UI usage
+def add_quality_points():
+    data = request.get_json(force=True) or {}
+    kpi_id = data.get('kpiId') or data.get('kpi_id')
+    qp_raw = data.get('qualityPoint') or data.get('qualityPoints') or data.get('quality_point')
+
+    if not kpi_id or qp_raw is None:
+        return format_response(False, "Missing kpiId or qualityPoint", None, 400)
+
+    try:
+        qp = _coerce_quality_point(qp_raw)
+    except ValueError as e:
+        return format_response(False, str(e), None, 400)
+
+    now = datetime.utcnow()
+    res = db.kpi.update_one(
+        {'kpiId': kpi_id},
+        {'$set': {'qualityPoints': qp, 'updatedAt': now}}
+    )
+    if res.matched_count == 0:
+        return format_response(False, "KPI not found", None, 404)
+
+    return format_response(True, "Quality points saved", {
+        'kpiId'        : kpi_id,
+        'qualityPoints': qp,
+        'updatedAt'    : now.isoformat()
+    }, 200)

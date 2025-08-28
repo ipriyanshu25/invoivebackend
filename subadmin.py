@@ -9,15 +9,18 @@ from utils import format_response
 subadmin_bp = Blueprint('subadmin', __name__, url_prefix='/subadmin')
 
 # Permission mapping: JSON field -> human-readable
+# Permission mapping: JSON field -> human-readable
 PERMISSIONS = {
-    'View payslip details':         'View payslip details',
-    'Generate payslip':             'Generate payslip',
-    'View Invoice details':         'View Invoice details',
-    'Generate invoice details':     'Generate invoice details',
-    'Add Employee Details':         'Add Employee details',
-    'View Employee Details':        'View employee details',
-    'Manage KPI':                   'Manage KPI',             # <<-- added here
+    'View payslip details':     'View payslip details',
+    'Generate payslip':         'Generate payslip',
+    'View Invoice details':     'View Invoice details',
+    'Generate invoice details': 'Generate invoice details',
+    'Add Employee Details':     'Add Employee details',
+    'View Employee Details':    'View employee details',
+    'Manage KPI':               'Manage KPI',
+    'KPI':                      'KPI',            # <-- added field
 }
+
 
 # Password complexity: uppercase, lowercase, digit, special char, min length 8
 PASSWORD_REGEX = re.compile(
