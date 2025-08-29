@@ -136,11 +136,15 @@ def updateKpi():
 
 @kpi_bp.route('/punch', methods=['POST'])
 def punchKpi():
-    data    = request.get_json(force=True) or {}
-    kpi_id  = data.get('kpiId')
-    remark  = data.get('remark') or data.get('Remark/comment') or data.get('comment')
-    if not kpi_id or remark is None:
-        return format_response(False, "Missing kpiId or remark", None, 400)
+    data   = request.get_json(force=True) or {}
+    kpi_id = data.get('kpiId')
+
+    # remark is OPTIONAL
+    remark_raw = data.get('remark') or data.get('Remark/comment') or data.get('comment')
+    remark = "" if remark_raw is None else str(remark_raw).strip()
+
+    if not kpi_id:
+        return format_response(False, "Missing kpiId", None, 400)
 
     kpi = db.kpi.find_one({'kpiId': kpi_id})
     if not kpi:
@@ -162,7 +166,7 @@ def punchKpi():
 
     punch_record = {
         'punchDate'  : now,
-        'remark'     : remark,
+        'remark'     : remark,   # may be ""
         'pointChange': change,
         'status'     : status
     }
@@ -174,8 +178,16 @@ def punchKpi():
     if change != 0:
         update_doc['$set']['points'] = new_pts
 
-    db.kpi.update_one({'kpiId': kpi_id}, update_doc)
+    # --- Save + error handling ---
+    try:
+        res = db.kpi.update_one({'kpiId': kpi_id}, update_doc)
+    except Exception as e:
+        return format_response(False, f"Punch failed to save: {e}", 500)
 
+    if not getattr(res, 'acknowledged', True) or res.matched_count == 0:
+        return format_response(False, "Punch not saved. Please try again.",500)
+
+    # Success response
     return format_response(True, "Punch recorded", {
         'kpiId'      : kpi_id,
         'punchDate'  : now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -185,6 +197,7 @@ def punchKpi():
         'points'     : new_pts,
         'updatedAt'  : now.isoformat()
     }, 200)
+
 
 
 @kpi_bp.route('/getAll', methods=['POST'])
