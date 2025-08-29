@@ -1,8 +1,9 @@
-from flask import Blueprint, request
+from flask import Blueprint, request,make_response
 from db import db
 from utils import format_response
 from datetime import datetime
 import uuid
+import csv, io
 
 kpi_bp = Blueprint('kpi', __name__, url_prefix='/kpi')
 
@@ -417,3 +418,132 @@ def add_quality_points():
         'qualityPoints': qp,
         'updatedAt'    : now.isoformat()
     }, 200)
+
+
+
+
+
+
+
+
+@kpi_bp.route('/exportCsv', methods=['POST'])
+def export_csv():
+    """
+    Export KPIs as CSV using the same filters as getAll/getByEmployeeId.
+    - If 'employeeId' is provided, exports that employee's view.
+    - Else, behaves like getAll (optionally filter by employeeIds).
+    - Pass {"all": true} to export all filtered rows (ignores pagination).
+    - CSV intentionally EXCLUDES any ID fields (kpiId, employeeId).
+    """
+    data = request.get_json() or {}
+
+    # Common filters
+    search = (data.get('search') or '').strip()
+    sd = data.get('startDate')
+    ed = data.get('endDate')
+    sort_by = (data.get('sortBy') or 'createdAt').strip()
+    sort_order = (data.get('sortOrder') or 'desc').lower()
+    sort_dir = -1 if sort_order == 'desc' else 1
+
+    # Pagination (used unless all=True)
+    try:
+        page = int(data.get('page', 1))
+        page_size = int(data.get('pageSize', 10))
+    except (TypeError, ValueError):
+        return format_response(False, "Invalid pagination parameters", None, 400)
+
+    export_all = bool(data.get('all') or data.get('exportAll'))
+
+    # Build query
+    query = {}
+    # Employee-specific or global list
+    employee_id = data.get('employeeId')
+    if employee_id:
+        query['employeeId'] = employee_id
+        if search:
+            query['project_name'] = {'$regex': search, '$options': 'i'}
+    else:
+        if search:
+            rx = {'$regex': search, '$options': 'i'}
+            query['$or'] = [{'project_name': rx}, {'employeeName': rx}]
+
+        # Optional employeeIds for admin view
+        employee_ids_raw = data.get('employeeIds', data.get('employesids'))
+        employee_ids = []
+        if isinstance(employee_ids_raw, str) and employee_ids_raw.strip():
+            employee_ids = [employee_ids_raw.strip()]
+        elif isinstance(employee_ids_raw, list):
+            employee_ids = [str(e).strip() for e in employee_ids_raw if str(e).strip()]
+        if employee_ids:
+            query['employeeId'] = {'$in': employee_ids}
+
+    # Date range on startdate
+    if sd and ed:
+        try:
+            start_dt = datetime.strptime(sd, '%Y-%m-%d')
+            end_dt = datetime.strptime(ed, '%Y-%m-%d')
+        except ValueError:
+            return format_response(False, "startDate/endDate must be YYYY-MM-DD", None, 400)
+        query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
+
+    # Sorting: allow 'startdate'/'deadline'/'createdAt'/'updatedAt'
+    allowed_sort = {'startdate', 'deadline', 'createdAt', 'updatedAt'}
+    sort_field = sort_by if sort_by in allowed_sort else 'createdAt'
+
+    cursor = db.kpi.find(query).sort(sort_field, sort_dir)
+
+    # Pagination window (unless exporting all)
+    if not export_all:
+        skip = max(0, (page - 1) * page_size)
+        cursor = cursor.skip(skip).limit(page_size)
+
+    # --- Compose CSV (NO ID COLUMNS) ---
+    def fmt_dt(dt, f='%Y-%m-%d'):
+        return dt.strftime(f) if hasattr(dt, 'strftime') else (dt if isinstance(dt, str) else '')
+
+    def fmt_iso(dt):
+        return dt.isoformat() if hasattr(dt, 'isoformat') else (dt if isinstance(dt, str) else '')
+
+    fieldnames = [
+        'EmployeeName','ProjectName','StartDate','Deadline',
+        'Remark','DeadlinePoints','QualityPoints',
+        'LastPunchDate','LastPunchStatus','LastPunchRemark'
+    
+    ]
+
+    rows = []
+    for k in cursor:
+        punches = k.get('punches', [])
+        last = punches[-1] if punches else {}
+        lp_date = last.get('punchDate')
+
+        rows.append({
+            # NOTE: no IDs here (kpiId/employeeId excluded)
+            'EmployeeName'   : k.get('employeeName', ''),
+            'ProjectName'    : k.get('project_name', ''),
+            'StartDate'      : fmt_dt(k.get('startdate')),
+            'Deadline'       : fmt_dt(k.get('deadline')),
+            'Remark'         : k.get('remark', ''),
+            'DeadlinePoints' : k.get('points', ''),
+            'QualityPoints'  : k.get('qualityPoints', ''),
+            'LastPunchDate'  : (lp_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(lp_date, 'strftime') else (lp_date or '')),
+            'LastPunchStatus': last.get('status') or '',
+            'LastPunchRemark': last.get('remark') or ''
+        })
+
+    # Strictly keep only declared columns to avoid DictWriter errors
+    filtered_rows = [{k: r.get(k, '') for k in fieldnames} for r in rows]
+
+    output = io.StringIO()
+    # Optional Excel-friendly BOM:
+    # output.write('\ufeff')
+
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(filtered_rows)
+
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    resp = make_response(output.getvalue())
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = f'attachment; filename="kpi_export_{ts}.csv"'
+    return resp
