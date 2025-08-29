@@ -7,6 +7,24 @@ import csv, io
 
 kpi_bp = Blueprint('kpi', __name__, url_prefix='/kpi')
 
+
+def _normalize_employee_ids(raw) -> list[str]:
+    """Accept single or multiple IDs and return a clean list[str]."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, (int, float)):
+        return [str(raw)]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        # support comma/space separated: "E1,E2" or "E1 E2"
+        parts = [p.strip() for p in s.replace(",", " ").split()]
+        return [p for p in parts if p]
+    return []
+
 def _coerce_quality_point(raw):
     """
     Accept -1 or 1 (int or string). Also accept 'negative'/'positive' etc.
@@ -457,25 +475,16 @@ def export_csv():
     # Build query
     query = {}
     # Employee-specific or global list
-    employee_id = data.get('employeeId')
-    if employee_id:
-        query['employeeId'] = employee_id
-        if search:
-            query['project_name'] = {'$regex': search, '$options': 'i'}
-    else:
-        if search:
-            rx = {'$regex': search, '$options': 'i'}
-            query['$or'] = [{'project_name': rx}, {'employeeName': rx}]
+    employee_ids = _normalize_employee_ids(data.get('employeeId'))
 
-        # Optional employeeIds for admin view
-        employee_ids_raw = data.get('employeeIds', data.get('employesids'))
-        employee_ids = []
-        if isinstance(employee_ids_raw, str) and employee_ids_raw.strip():
-            employee_ids = [employee_ids_raw.strip()]
-        elif isinstance(employee_ids_raw, list):
-            employee_ids = [str(e).strip() for e in employee_ids_raw if str(e).strip()]
-        if employee_ids:
-            query['employeeId'] = {'$in': employee_ids}
+    if employee_ids:
+        # If one ID -> equality; if many -> $in
+        query['employeeId'] = employee_ids[0] if len(employee_ids) == 1 else {'$in': employee_ids}
+
+    # Search filter (applies regardless of employee filter)
+    if search:
+        rx = {'$regex': search, '$options': 'i'}
+        query['$or'] = [{'project_name': rx}, {'employeeName': rx}]
 
     # Date range on startdate
     if sd and ed:
