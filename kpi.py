@@ -1,12 +1,18 @@
-from flask import Blueprint, request,make_response
+from flask import Blueprint, request, make_response
 from db import db
 from utils import format_response
-from datetime import datetime
 import uuid
 import csv, io
 
+from datetime import datetime, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))
+UTC = timezone.utc
+
 kpi_bp = Blueprint('kpi', __name__, url_prefix='/kpi')
 
+
+# ---------- Helpers (timezone-safe) ----------
 
 def _normalize_employee_ids(raw) -> list[str]:
     """Accept single or multiple IDs and return a clean list[str]."""
@@ -24,6 +30,7 @@ def _normalize_employee_ids(raw) -> list[str]:
         parts = [p.strip() for p in s.replace(",", " ").split()]
         return [p for p in parts if p]
     return []
+
 
 def _coerce_quality_point(raw):
     """
@@ -49,11 +56,51 @@ def _coerce_quality_point(raw):
         raise ValueError("qualityPoint must be -1 or 1")
     return val
 
-def _parse_date(s, field_name):
+
+def _parse_date_ist(s: str, field_name: str) -> datetime:
+    """
+    Parse a YYYY-MM-DD string and return an IST-aware datetime at 00:00:00.
+    """
     try:
-        return datetime.strptime(s, '%Y-%m-%d')
+        d = datetime.strptime(s, '%Y-%m-%d')
+        return d.replace(tzinfo=IST)
     except Exception:
         raise ValueError(f"Invalid {field_name}, must be YYYY-MM-DD")
+
+
+def _as_ist(dt):
+    """
+    Convert any datetime to IST for display.
+    - If naive: assume UTC for legacy data, then convert to IST.
+    - If aware: convert to IST.
+    """
+    if not isinstance(dt, datetime):
+        return dt
+    if dt.tzinfo is None:
+        # legacy stored values (previously used utcnow() / naive) -> treat as UTC
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(IST)
+
+
+def _fmt_date(dt, f='%Y-%m-%d'):
+    """
+    Format a datetime in IST. Accepts naive/aware or str.
+    """
+    if hasattr(dt, 'strftime'):
+        return _as_ist(dt).strftime(f)
+    return dt if isinstance(dt, str) else None
+
+
+def _fmt_iso(dt):
+    """
+    ISO format with timezone (+05:30). Accepts naive/aware or str.
+    """
+    if hasattr(dt, 'isoformat'):
+        return _as_ist(dt).isoformat()
+    return dt if isinstance(dt, str) else None
+
+
+# ---------- Routes ----------
 
 @kpi_bp.route('/addkpi', methods=['POST'])
 def addKpi():
@@ -72,12 +119,12 @@ def addKpi():
         return format_response(False, "Employee not found", None, 404)
 
     try:
-        startdate = datetime.strptime(start_str, '%Y-%m-%d')
-        deadline  = datetime.strptime(deadline_str, '%Y-%m-%d')
-    except ValueError:
-        return format_response(False, "Incorrect date format, should be YYYY-MM-DD", None, 400)
+        startdate = _parse_date_ist(start_str, 'startdate')
+        deadline  = _parse_date_ist(deadline_str, 'deadline')
+    except ValueError as ve:
+        return format_response(False, str(ve), None, 400)
 
-    now = datetime.utcnow()
+    now = datetime.now(IST)
     kpi_id = str(uuid.uuid4())
     kpi_doc = {
         'kpiId'        : kpi_id,
@@ -113,7 +160,7 @@ def updateKpi():
     if not updates:
         return format_response(False, "No fields to update", None, 400)
 
-    updates['updatedAt'] = datetime.utcnow()
+    updates['updatedAt'] = datetime.now(IST)
     result = db.kpi.update_one({'kpiId': kpi_id}, {'$set': updates})
     if result.matched_count == 0:
         return format_response(False, "KPI not found", None, 404)
@@ -124,12 +171,12 @@ def updateKpi():
         'employeeId'  : kpi['employeeId'],
         'employeeName': kpi['employeeName'],
         'projectName' : kpi['project_name'],
-        'startdate'   : kpi['startdate'].strftime('%Y-%m-%d'),
-        'deadline'    : kpi['deadline'].strftime('%Y-%m-%d'),
-        'Remark'      : kpi['remark'],
-        'points'      : kpi['points'],
-        'createdAt'   : kpi['createdAt'].isoformat(),
-        'updatedAt'   : kpi['updatedAt'].isoformat()
+        'startdate'   : _fmt_date(kpi['startdate']),
+        'deadline'    : _fmt_date(kpi['deadline']),
+        'Remark'      : kpi.get('remark'),
+        'points'      : kpi.get('points'),
+        'createdAt'   : _fmt_iso(kpi.get('createdAt')),
+        'updatedAt'   : _fmt_iso(kpi.get('updatedAt')),
     }
     return format_response(True, "KPI updated", payload, 200)
 
@@ -139,10 +186,6 @@ def punchKpi():
     data   = request.get_json(force=True) or {}
     kpi_id = data.get('kpiId')
 
-    # remark is OPTIONAL
-    remark_raw = data.get('remark') or data.get('Remark/comment') or data.get('comment')
-    remark = "" if remark_raw is None else str(remark_raw).strip()
-
     if not kpi_id:
         return format_response(False, "Missing kpiId", None, 400)
 
@@ -150,11 +193,18 @@ def punchKpi():
     if not kpi:
         return format_response(False, "KPI not found", None, 404)
 
-    now      = datetime.utcnow()
-    deadline = kpi.get('deadline')
-    old_pts  = kpi.get('points', -1)
+    # --- Always use IST ---
+    now = datetime.now(IST)
 
-    on_time = isinstance(deadline, datetime) and now.date() <= deadline.date()
+    deadline = kpi.get('deadline')
+    if isinstance(deadline, datetime):
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=IST)
+        on_time = now.date() <= deadline.astimezone(IST).date()
+    else:
+        on_time = False
+
+    old_pts = kpi.get('points', -1)
     if on_time and old_pts == -1:
         new_pts = 1
         change  = new_pts - old_pts
@@ -165,39 +215,31 @@ def punchKpi():
     status = "On Time" if on_time else "Late Submission"
 
     punch_record = {
-        'punchDate'  : now,
-        'remark'     : remark,   # may be ""
+        'punchDate'  : now,  # stored in IST
+        'remark'     : data.get('remark', ''),
         'pointChange': change,
         'status'     : status
     }
 
     update_doc = {
         '$push': {'punches': punch_record},
-        '$set' : {'updatedAt': now}
+        '$set' : {'updatedAt': now, 'points': new_pts}
     }
-    if change != 0:
-        update_doc['$set']['points'] = new_pts
 
-    # --- Save + error handling ---
-    try:
-        res = db.kpi.update_one({'kpiId': kpi_id}, update_doc)
-    except Exception as e:
-        return format_response(False, f"Punch failed to save: {e}", 500)
+    res = db.kpi.update_one({'kpiId': kpi_id}, update_doc)
+    if res.matched_count == 0:
+        return format_response(False, "KPI not found", None, 404)
 
-    if not getattr(res, 'acknowledged', True) or res.matched_count == 0:
-        return format_response(False, "Punch not saved. Please try again.",500)
-
-    # Success response
+    # --- Force IST output ---
     return format_response(True, "Punch recorded", {
         'kpiId'      : kpi_id,
-        'punchDate'  : now.strftime('%Y-%m-%d %H:%M:%S'),
-        'remark'     : remark,
+        'punchDate'  : now.isoformat(sep=' ', timespec='seconds'),
+        'remark'     : data.get('remark', ''),
         'pointChange': change,
         'status'     : status,
         'points'     : new_pts,
         'updatedAt'  : now.isoformat()
     }, 200)
-
 
 
 @kpi_bp.route('/getAll', methods=['POST'])
@@ -220,19 +262,19 @@ def getAll():
             {'employeeName': rx},
         ]
 
-    # Optional date-range filter on startdate (inclusive)
+    # Optional date-range filter on startdate (inclusive, interpreted in IST)
     sd = data.get('startDate')
     ed = data.get('endDate')
     if sd and ed:
         try:
-            start_dt = datetime.strptime(sd, '%Y-%m-%d')
-            end_dt   = datetime.strptime(ed, '%Y-%m-%d')
-        except ValueError:
-            return format_response(False, "startDate/endDate must be YYYY-MM-DD", None, 400)
+            start_dt = _parse_date_ist(sd, 'startDate')
+            # inclusive end -> set to 23:59:59 IST
+            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+        except ValueError as ve:
+            return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
 
     # Optional employeeIds filter (accept list OR single string)
-    # also accept legacy/misspelled key 'employesids'
     employee_ids_raw = data.get('employeeIds', data.get('employesids'))
     employee_ids: list[str] = []
     if isinstance(employee_ids_raw, str) and employee_ids_raw.strip():
@@ -269,27 +311,24 @@ def getAll():
         for p in k.get('punches', []):
             pd = p.get('punchDate')
             punches.append({
-                'punchDate': pd.strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else (pd or None),
+                'punchDate': (_as_ist(pd).strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else (pd or None)),
                 'remark'   : p.get('remark'),
                 'status'   : p.get('status')
             })
 
-        def fmt(dt, f='%Y-%m-%d'):
-            return dt.strftime(f) if hasattr(dt, 'strftime') else (dt if isinstance(dt, str) else None)
-
         kpis.append({
-            'kpiId'       : k.get('kpiId'),
-            'employeeId'  : k.get('employeeId'),
-            'employeeName': k.get('employeeName'),
-            'projectName' : k.get('project_name'),
-            'startdate'   : fmt(k.get('startdate')),
-            'deadline'    : fmt(k.get('deadline')),
-            'Remark'      : k.get('remark'),
-            'points'      : k.get('points'),
-            'qualityPoints': k.get('qualityPoints'),   # <— ADD THIS
-            'createdAt'   : k.get('createdAt').isoformat() if hasattr(k.get('createdAt'), 'isoformat') else (k.get('createdAt') or None),
-            'updatedAt'   : k.get('updatedAt').isoformat() if hasattr(k.get('updatedAt'), 'isoformat') else (k.get('updatedAt') or None),
-            'punches'     : punches
+            'kpiId'        : k.get('kpiId'),
+            'employeeId'   : k.get('employeeId'),
+            'employeeName' : k.get('employeeName'),
+            'projectName'  : k.get('project_name'),
+            'startdate'    : _fmt_date(k.get('startdate')),
+            'deadline'     : _fmt_date(k.get('deadline')),
+            'Remark'       : k.get('remark'),
+            'points'       : k.get('points'),
+            'qualityPoints': k.get('qualityPoints'),
+            'createdAt'    : _fmt_iso(k.get('createdAt')),
+            'updatedAt'    : _fmt_iso(k.get('updatedAt')),
+            'punches'      : punches
         })
 
     return format_response(True, "KPIs retrieved", {
@@ -325,10 +364,10 @@ def getByKpiId(kpi_id):
         'employeeId'  : kpi['employeeId'],
         'employeeName': kpi['employeeName'],
         'projectName' : kpi['project_name'],
-        'startdate'   : kpi['startdate'].strftime('%Y-%m-%d'),
-        'deadline'    : kpi['deadline'].strftime('%Y-%m-%d'),
-        'Remark'      : kpi['remark'],
-        'points'      : kpi['points']
+        'startdate'   : _fmt_date(kpi['startdate']),
+        'deadline'    : _fmt_date(kpi['deadline']),
+        'Remark'      : kpi.get('remark'),
+        'points'      : kpi.get('points')
     }
     return format_response(True, "KPI retrieved", data, 200)
 
@@ -345,15 +384,15 @@ def getByEmployeeId():
     if (s := (data.get('search') or '').strip()):
         query['project_name'] = {'$regex': s, '$options': 'i'}
 
-    # Date‐range filter on startdate
+    # Date‐range filter on startdate (inclusive, IST)
     sd = data.get('startDate')
     ed = data.get('endDate')
     if sd and ed:
         try:
-            start_dt = datetime.strptime(sd, '%Y-%m-%d')
-            end_dt   = datetime.strptime(ed, '%Y-%m-%d')
-        except ValueError:
-            return format_response(False, "startDate/endDate must be YYYY-MM-DD", None, 400)
+            start_dt = _parse_date_ist(sd, 'startDate')
+            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+        except ValueError as ve:
+            return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
 
     # Pagination params
@@ -382,31 +421,27 @@ def getByEmployeeId():
         for p in kpi.get('punches', []):
             pd = p.get('punchDate')
             punches_list.append({
-                'punchDate'  : pd.strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else None,
+                'punchDate'  : (_as_ist(pd).strftime('%Y-%m-%d %H:%M:%S') if hasattr(pd, 'strftime') else None),
                 'remark'     : p.get('remark'),
                 'status'     : p.get('status')
             })
 
-        # Safe date formatting
-        def fmt(dt, f='%Y-%m-%d'):
-            return dt.strftime(f) if hasattr(dt, 'strftime') else None
-
-        created_str = kpi.get('createdAt').isoformat() if hasattr(kpi.get('createdAt'), 'isoformat') else None
-        updated_str = kpi.get('updatedAt').isoformat() if hasattr(kpi.get('updatedAt'), 'isoformat') else None
+        created_str = _fmt_iso(kpi.get('createdAt'))
+        updated_str = _fmt_iso(kpi.get('updatedAt'))
 
         kpis.append({
-            'kpiId'       : kpi.get('kpiId'),
-            'employeeId'  : kpi.get('employeeId'),
-            'employeeName': kpi.get('employeeName'),
-            'projectName' : kpi.get('project_name'),
-            'startdate'   : fmt(kpi.get('startdate')),
-            'deadline'    : fmt(kpi.get('deadline')),
-            'Remark'      : kpi.get('remark'),
-            'points'      : kpi.get('points'),
-            'qualityPoints': kpi.get('qualityPoints'),  # <— ADD THIS
-            'createdAt'   : created_str,
-            'updatedAt'   : updated_str,
-            'punches'     : punches_list
+            'kpiId'        : kpi.get('kpiId'),
+            'employeeId'   : kpi.get('employeeId'),
+            'employeeName' : kpi.get('employeeName'),
+            'projectName'  : kpi.get('project_name'),
+            'startdate'    : _fmt_date(kpi.get('startdate')),
+            'deadline'     : _fmt_date(kpi.get('deadline')),
+            'Remark'       : kpi.get('remark'),
+            'points'       : kpi.get('points'),
+            'qualityPoints': kpi.get('qualityPoints'),
+            'createdAt'    : created_str,
+            'updatedAt'    : updated_str,
+            'punches'      : punches_list
         })
 
     return format_response(
@@ -436,7 +471,7 @@ def add_quality_points():
     except ValueError as e:
         return format_response(False, str(e), None, 400)
 
-    now = datetime.utcnow()
+    now = datetime.now(IST)
     res = db.kpi.update_one(
         {'kpiId': kpi_id},
         {'$set': {'qualityPoints': qp, 'updatedAt': now}}
@@ -447,14 +482,8 @@ def add_quality_points():
     return format_response(True, "Quality points saved", {
         'kpiId'        : kpi_id,
         'qualityPoints': qp,
-        'updatedAt'    : now.isoformat()
+        'updatedAt'    : _fmt_iso(now)
     }, 200)
-
-
-
-
-
-
 
 
 @kpi_bp.route('/exportCsv', methods=['POST'])
@@ -465,6 +494,7 @@ def export_csv():
     - Else, behaves like getAll (optionally filter by employeeIds).
     - Pass {"all": true} to export all filtered rows (ignores pagination).
     - CSV intentionally EXCLUDES any ID fields (kpiId, employeeId).
+    - All dates in CSV are shown in IST.
     """
     data = request.get_json() or {}
 
@@ -499,13 +529,13 @@ def export_csv():
         rx = {'$regex': search, '$options': 'i'}
         query['$or'] = [{'project_name': rx}, {'employeeName': rx}]
 
-    # Date range on startdate
+    # Date range on startdate (inclusive, IST)
     if sd and ed:
         try:
-            start_dt = datetime.strptime(sd, '%Y-%m-%d')
-            end_dt = datetime.strptime(ed, '%Y-%m-%d')
-        except ValueError:
-            return format_response(False, "startDate/endDate must be YYYY-MM-DD", None, 400)
+            start_dt = _parse_date_ist(sd, 'startDate')
+            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+        except ValueError as ve:
+            return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
 
     # Sorting: allow 'startdate'/'deadline'/'createdAt'/'updatedAt'
@@ -521,16 +551,12 @@ def export_csv():
 
     # --- Compose CSV (NO ID COLUMNS) ---
     def fmt_dt(dt, f='%Y-%m-%d'):
-        return dt.strftime(f) if hasattr(dt, 'strftime') else (dt if isinstance(dt, str) else '')
-
-    def fmt_iso(dt):
-        return dt.isoformat() if hasattr(dt, 'isoformat') else (dt if isinstance(dt, str) else '')
+        return _fmt_date(dt, f) or ''
 
     fieldnames = [
         'EmployeeName','ProjectName','StartDate','Deadline',
         'Remark','DeadlinePoints','QualityPoints',
         'LastPunchDate','LastPunchStatus','LastPunchRemark'
-    
     ]
 
     rows = []
@@ -548,7 +574,7 @@ def export_csv():
             'Remark'         : k.get('remark', ''),
             'DeadlinePoints' : k.get('points', ''),
             'QualityPoints'  : k.get('qualityPoints', ''),
-            'LastPunchDate'  : (lp_date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(lp_date, 'strftime') else (lp_date or '')),
+            'LastPunchDate'  : (_as_ist(lp_date).strftime('%Y-%m-%d %H:%M:%S') if hasattr(lp_date, 'strftime') else (lp_date or '')),
             'LastPunchStatus': last.get('status') or '',
             'LastPunchRemark': last.get('remark') or ''
         })
@@ -557,14 +583,11 @@ def export_csv():
     filtered_rows = [{k: r.get(k, '') for k in fieldnames} for r in rows]
 
     output = io.StringIO()
-    # Optional Excel-friendly BOM:
-    # output.write('\ufeff')
-
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     writer.writerows(filtered_rows)
 
-    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    ts = datetime.now(IST).strftime('%Y%m%d_%H%M%S')
     resp = make_response(output.getvalue())
     resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
     resp.headers['Content-Disposition'] = f'attachment; filename="kpi_export_{ts}.csv"'
