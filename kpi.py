@@ -68,6 +68,17 @@ def _parse_date_ist(s: str, field_name: str) -> datetime:
         raise ValueError(f"Invalid {field_name}, must be YYYY-MM-DD")
 
 
+def _end_of_day_ist(dt: datetime) -> datetime:
+    """Return same calendar day at 23:59:59 IST."""
+    return _as_ist(dt).replace(hour=23, minute=59, second=59, microsecond=0)
+
+
+def _parse_end_of_day_ist(s: str, field_name: str) -> datetime:
+    """Parse YYYY-MM-DD then set time to 23:59:59 IST."""
+    base = _parse_date_ist(s, field_name)  # 00:00 IST of that day
+    return _end_of_day_ist(base)
+
+
 def _as_ist(dt):
     """
     Convert any datetime to IST for display.
@@ -84,7 +95,16 @@ def _as_ist(dt):
 
 def _fmt_date(dt, f='%Y-%m-%d'):
     """
-    Format a datetime in IST. Accepts naive/aware or str.
+    Format a datetime in IST (date only). Accepts naive/aware or str.
+    """
+    if hasattr(dt, 'strftime'):
+        return _as_ist(dt).strftime(f)
+    return dt if isinstance(dt, str) else None
+
+
+def _fmt_dt(dt, f='%Y-%m-%d %H:%M:%S'):
+    """
+    Format a datetime in IST with time. Accepts naive/aware or str.
     """
     if hasattr(dt, 'strftime'):
         return _as_ist(dt).strftime(f)
@@ -107,11 +127,12 @@ def addKpi():
     data = request.get_json() or {}
     employee_id  = data.get('employeeId')
     project_name = data.get('projectName')
-    start_str    = data.get('startdate')
+    # start_str is intentionally ignored for storage: startdate = creation moment (IST)
     deadline_str = data.get('deadline')
     remark       = data.get('Remark/comment') or data.get('Remark') or data.get('comment')
 
-    if not all([employee_id, project_name, start_str, deadline_str]):
+    # Required fields: employee, project, deadline
+    if not all([employee_id, project_name, deadline_str]):
         return format_response(False, "Missing required fields", None, 400)
 
     employee = db.employees.find_one({'employeeId': employee_id})
@@ -119,12 +140,13 @@ def addKpi():
         return format_response(False, "Employee not found", None, 404)
 
     try:
-        startdate = _parse_date_ist(start_str, 'startdate')
-        deadline  = _parse_date_ist(deadline_str, 'deadline')
+        now = datetime.now(IST)
+        startdate = now  # startdate is the creation moment in IST
+        # deadline should be the selected date at 23:59:59 IST
+        deadline  = _parse_end_of_day_ist(deadline_str, 'deadline')
     except ValueError as ve:
         return format_response(False, str(ve), None, 400)
 
-    now = datetime.now(IST)
     kpi_id = str(uuid.uuid4())
     kpi_doc = {
         'kpiId'        : kpi_id,
@@ -140,6 +162,7 @@ def addKpi():
         'updatedAt'    : now
     }
     db.kpi.insert_one(kpi_doc)
+    # Return kpiId only to preserve API shape; frontend should fetch details if needed
     return format_response(True, "KPI added", {'kpiId': kpi_id}, 201)
 
 
@@ -171,8 +194,8 @@ def updateKpi():
         'employeeId'  : kpi['employeeId'],
         'employeeName': kpi['employeeName'],
         'projectName' : kpi['project_name'],
-        'startdate'   : _fmt_date(kpi['startdate']),
-        'deadline'    : _fmt_date(kpi['deadline']),
+        'startdate'   : _fmt_dt(kpi['startdate']),   # now returns IST date+time
+        'deadline'    : _fmt_dt(kpi['deadline']),    # EOD IST
         'Remark'      : kpi.get('remark'),
         'points'      : kpi.get('points'),
         'createdAt'   : _fmt_iso(kpi.get('createdAt')),
@@ -198,9 +221,8 @@ def punchKpi():
 
     deadline = kpi.get('deadline')
     if isinstance(deadline, datetime):
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=IST)
-        on_time = now.date() <= deadline.astimezone(IST).date()
+        # Compare exact timestamp in IST (treat naive as UTC then convert)
+        on_time = now <= _as_ist(deadline)
     else:
         on_time = False
 
@@ -215,7 +237,7 @@ def punchKpi():
     status = "On Time" if on_time else "Late Submission"
 
     punch_record = {
-        'punchDate'  : now,  # stored in IST
+        'punchDate'  : now,  # stored in IST (Mongo stores underlying UTC)
         'remark'     : data.get('remark', ''),
         'pointChange': change,
         'status'     : status
@@ -269,7 +291,7 @@ def getAll():
         try:
             start_dt = _parse_date_ist(sd, 'startDate')
             # inclusive end -> set to 23:59:59 IST
-            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+            end_dt   = _parse_end_of_day_ist(ed, 'endDate')
         except ValueError as ve:
             return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
@@ -321,8 +343,9 @@ def getAll():
             'employeeId'   : k.get('employeeId'),
             'employeeName' : k.get('employeeName'),
             'projectName'  : k.get('project_name'),
-            'startdate'    : _fmt_date(k.get('startdate')),
-            'deadline'     : _fmt_date(k.get('deadline')),
+            # NOTE: date-only for list view
+            'startdate'    : _fmt_date(k.get('startdate')),   # <-- changed from _fmt_dt
+            'deadline'     : _fmt_date(k.get('deadline')),    # <-- changed from _fmt_dt
             'Remark'       : k.get('remark'),
             'points'       : k.get('points'),
             'qualityPoints': k.get('qualityPoints'),
@@ -364,8 +387,8 @@ def getByKpiId(kpi_id):
         'employeeId'  : kpi['employeeId'],
         'employeeName': kpi['employeeName'],
         'projectName' : kpi['project_name'],
-        'startdate'   : _fmt_date(kpi['startdate']),
-        'deadline'    : _fmt_date(kpi['deadline']),
+        'startdate'   : _fmt_dt(kpi['startdate']),   # IST with time
+        'deadline'    : _fmt_dt(kpi['deadline']),    # IST EOD
         'Remark'      : kpi.get('remark'),
         'points'      : kpi.get('points')
     }
@@ -390,7 +413,7 @@ def getByEmployeeId():
     if sd and ed:
         try:
             start_dt = _parse_date_ist(sd, 'startDate')
-            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+            end_dt   = _parse_end_of_day_ist(ed, 'endDate')
         except ValueError as ve:
             return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
@@ -434,8 +457,8 @@ def getByEmployeeId():
             'employeeId'   : kpi.get('employeeId'),
             'employeeName' : kpi.get('employeeName'),
             'projectName'  : kpi.get('project_name'),
-            'startdate'    : _fmt_date(kpi.get('startdate')),
-            'deadline'     : _fmt_date(kpi.get('deadline')),
+            'startdate'    : _fmt_dt(kpi.get('startdate')),
+            'deadline'     : _fmt_dt(kpi.get('deadline')),
             'Remark'       : kpi.get('remark'),
             'points'       : kpi.get('points'),
             'qualityPoints': kpi.get('qualityPoints'),
@@ -494,7 +517,7 @@ def export_csv():
     - Else, behaves like getAll (optionally filter by employeeIds).
     - Pass {"all": true} to export all filtered rows (ignores pagination).
     - CSV intentionally EXCLUDES any ID fields (kpiId, employeeId).
-    - All dates in CSV are shown in IST.
+    - All dates in CSV are shown in IST (with time).
     """
     data = request.get_json() or {}
 
@@ -533,7 +556,7 @@ def export_csv():
     if sd and ed:
         try:
             start_dt = _parse_date_ist(sd, 'startDate')
-            end_dt   = _parse_date_ist(ed, 'endDate') + timedelta(hours=23, minutes=59, seconds=59)
+            end_dt   = _parse_end_of_day_ist(ed, 'endDate')
         except ValueError as ve:
             return format_response(False, str(ve), None, 400)
         query['startdate'] = {'$gte': start_dt, '$lte': end_dt}
@@ -550,15 +573,14 @@ def export_csv():
         cursor = cursor.skip(skip).limit(page_size)
 
     # --- Compose CSV (NO ID COLUMNS) ---
-    def fmt_dt(dt, f='%Y-%m-%d'):
-        return _fmt_date(dt, f) or ''
+    def fmt_dt(dt, f='%Y-%m-%d %H:%M:%S'):
+        return _fmt_dt(dt, f) or ''
 
     fieldnames = [
         'EmployeeName','ProjectName','StartDate','Deadline',
         'Remark','DeadlinePoints','QualityPoints',
         'LastPunchDate','LastPunchStatus','LastPunchRemark'
     ]
-
     rows = []
     for k in cursor:
         punches = k.get('punches', [])
