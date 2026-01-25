@@ -46,28 +46,74 @@ def _safe_iso(dt):
 # AuthZ helpers (Zone + Permissions)
 # ----------------------------
 
+def _normalize_zone_ids(raw) -> List[str]:
+    """
+    JWT sometimes stores zoneIds as:
+      - ["z1","z2"]
+      - "['z1','z2']"
+      - "z1,z2"
+      - "*"
+    Normalize to List[str].
+    """
+    if raw is None:
+        return []
+
+    # already list
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    # string case
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s == "*":
+            return ["*"]
+
+        # try json list
+        try:
+            import json
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+
+        # fallback: comma/space split
+        parts = [p.strip() for p in s.replace(";", ",").split(",")]
+        return [p for p in parts if p]
+
+    # fallback
+    return [str(raw).strip()] if str(raw).strip() else []
+
+
 def _scope():
     """
     Expected JWT claims:
       role: "admin" | "subadmin"
       zoneIds: ["..."] or ["*"] (admin)
-      employeeId: "EMPxxxx" (subadmin/admin)
-      permissions: { "View Employee Details": 1, ... }
+      employeeId: "EMPxxxx"
+      permissions: { ... }
     """
     claims = get_jwt() or {}
     role = (claims.get("role") or "").lower()
-    zone_ids = claims.get("zoneIds") or []
+
+    zone_ids = _normalize_zone_ids(claims.get("zoneIds"))
     perms = claims.get("permissions") or {}
 
-    # admin full access if zoneIds empty OR includes "*"
     is_admin_all = (role == "admin") and (not zone_ids or "*" in zone_ids)
     return role, zone_ids, perms, is_admin_all
 
 def _zone_query(field: str = "zoneId") -> dict:
     """Mongo filter enforcing zone scope."""
-    _role, zone_ids, _perms, is_admin_all = _scope()
+    role, zone_ids, _perms, is_admin_all = _scope()
+
     if is_admin_all:
         return {}
+
+    if role != "admin" and not zone_ids:
+        return {field: {"$in": ["__no_zone_access__"]}}
+
     return {field: {"$in": zone_ids}}
 
 def _ensure_in_scope(doc_zone_id: Optional[str]):
@@ -298,9 +344,9 @@ def kpi_employee_list():
     """
     Employees list for KPI screen ONLY.
     - Only Admin or Manage KPI can access.
-    - Subadmin Manage KPI can see employees:
-        * within their zones
-        * AND same timezone as themselves
+    - Subadmin Manage KPI can see employees within their zones.
+    - Timezone filter is applied ONLY if subadmin has SINGLE zone scope.
+      (If multi-zone access, show employees from all allowed zones.)
     """
     try:
         if not _has_manage_kpi():
@@ -311,11 +357,15 @@ def kpi_employee_list():
         page = max(int(params.get("page", 1)), 1)
         size = max(int(params.get("pageSize", 500)), 1)
 
+        role, zone_ids, _perms, is_admin_all = _scope()
+
         query: Dict[str, Any] = {}
         query.update(_zone_query("zoneId"))
 
-        role, _zone_ids, _perms, _all = _scope()
-        if role != "admin":
+        # ✅ Apply SAME timezone restriction ONLY for single-zone subadmin
+        # (multi-zone subadmin should see employees across their allowed zones)
+        is_multi_zone = ("*" in zone_ids) or (len(zone_ids) > 1)
+        if role != "admin" and not is_multi_zone:
             query["timezone"] = _caller_timezone_key()
 
         if search:
@@ -347,7 +397,6 @@ def kpi_employee_list():
         return format_response(False, str(e), None, 403)
     except Exception:
         return format_response(False, "Internal server error", None, 500)
-
 
 # ----------------------------
 # Employee CRUD (unchanged permissions)

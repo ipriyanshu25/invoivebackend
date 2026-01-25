@@ -1,6 +1,7 @@
 import re
 import uuid
-import csv, io
+import csv
+import io
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from zoneinfo import ZoneInfo
@@ -36,12 +37,50 @@ OFFICE_TZ_MAP = {
     "america": "America/Los_Angeles",
 }
 
+ALLOWED_SORT_FIELDS = {"startdate", "deadline", "createdAt", "updatedAt"}
+
+
 # ======================================================
 # JWT / Permission / Zone helpers
 # ======================================================
 
 def _claims() -> Dict[str, Any]:
     return get_jwt() or {}
+
+
+def _normalize_zone_ids(raw) -> List[str]:
+    """zoneIds can be list, stringified JSON list, comma string, or '*'."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s == "*":
+            return ["*"]
+
+        # try JSON list
+        try:
+            import json
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+
+        # fallback: comma/space split
+        parts = [p.strip() for p in s.replace(";", ",").replace("|", ",").split(",")]
+        return [p for p in parts if p]
+
+    s = str(raw).strip()
+    return [s] if s else []
+
+
+def _is_multi_zone(zone_ids: List[str]) -> bool:
+    return ("*" in zone_ids) or (len(zone_ids) > 1)
+
 
 def _scope() -> Tuple[str, List[str], Dict[str, Any], bool]:
     """
@@ -53,13 +92,15 @@ def _scope() -> Tuple[str, List[str], Dict[str, Any], bool]:
     """
     c = _claims()
     role = (c.get("role") or "").lower()
-    zone_ids = c.get("zoneIds") or []
+    zone_ids = _normalize_zone_ids(c.get("zoneIds"))
     perms = c.get("permissions") or {}
-    is_admin_all = role == "admin" and (not zone_ids or "*" in zone_ids)
+    is_admin_all = (role == "admin") and (not zone_ids or "*" in zone_ids)
     return role, zone_ids, perms, is_admin_all
+
 
 def _caller_employee_id() -> str:
     return (_claims().get("employeeId") or "").strip()
+
 
 def _kpi_mode() -> str:
     """
@@ -77,16 +118,22 @@ def _kpi_mode() -> str:
         return "self"
     raise PermissionError("Permission denied (KPI)")
 
+
 def _require_manage_kpi():
     if _kpi_mode() not in ("admin", "manage"):
         raise PermissionError("Permission denied (Manage KPI required)")
 
+
 def _ensure_zone_allowed(zone_id: Optional[str]):
+    """Raise 403 if zone_id not in caller zone scope (unless admin-all)."""
     _role, zone_ids, _perms, is_admin_all = _scope()
     if is_admin_all:
         return
+    if not zone_ids:
+        raise PermissionError("Forbidden (no zone scope)")
     if not zone_id or zone_id not in zone_ids:
         raise PermissionError("Forbidden (different zone)")
+
 
 # ======================================================
 # Timezone / Date helpers (store UTC)
@@ -94,6 +141,7 @@ def _ensure_zone_allowed(zone_id: Optional[str]):
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
+
 
 def _tz_from_name(name: Optional[str]) -> ZoneInfo:
     if not name:
@@ -104,13 +152,16 @@ def _tz_from_name(name: Optional[str]) -> ZoneInfo:
     except Exception:
         return DEFAULT_TZ
 
+
 def _tz_key(tz: ZoneInfo) -> str:
     key = getattr(tz, "key", str(tz))
     return TZ_ALIASES.get(key, key)
 
+
 def _employee_zone_id(emp: Dict[str, Any]) -> Optional[str]:
     zid = (emp.get("zoneId") or emp.get("zone_id") or "").strip()
     return zid or None
+
 
 def _employee_timezone(emp: Dict[str, Any]) -> ZoneInfo:
     tz_name = (emp.get("timezone") or emp.get("tz") or "").strip()
@@ -123,6 +174,7 @@ def _employee_timezone(emp: Dict[str, Any]) -> ZoneInfo:
             return ZoneInfo(tz)
     return DEFAULT_TZ
 
+
 def _as_utc(dt):
     if not isinstance(dt, datetime):
         return dt
@@ -130,17 +182,22 @@ def _as_utc(dt):
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
 
+
 def _as_tz(dt, tz: ZoneInfo):
     return _as_utc(dt).astimezone(tz) if isinstance(dt, datetime) else dt
+
 
 def _fmt_date_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d"):
     return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
 
+
 def _fmt_dt_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d %H:%M:%S"):
     return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
 
+
 def _fmt_iso_in_tz(dt, tz: ZoneInfo):
     return _as_tz(dt, tz).isoformat() if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
+
 
 def _parse_date_in_tz(s: str, field_name: str, tz: ZoneInfo) -> datetime:
     """YYYY-MM-DD -> tz-aware local midnight"""
@@ -150,16 +207,20 @@ def _parse_date_in_tz(s: str, field_name: str, tz: ZoneInfo) -> datetime:
     except Exception:
         raise ValueError(f"Invalid {field_name}, must be YYYY-MM-DD")
 
+
 def _end_of_day_local(local_dt: datetime) -> datetime:
     return local_dt.replace(hour=23, minute=59, second=59, microsecond=0)
 
+
 def _parse_eod_in_tz(s: str, field_name: str, tz: ZoneInfo) -> datetime:
     return _end_of_day_local(_parse_date_in_tz(s, field_name, tz))
+
 
 def _parse_filter_range_to_utc(sd: str, ed: str, tz: ZoneInfo) -> Tuple[datetime, datetime]:
     start_local = _parse_date_in_tz(sd, "startDate", tz)
     end_local = _parse_eod_in_tz(ed, "endDate", tz)
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
+
 
 # ======================================================
 # ID + validation helpers
@@ -180,6 +241,7 @@ def _normalize_employee_ids(raw) -> List[str]:
         return [p for p in parts if p]
     return []
 
+
 def _coerce_quality_point(raw) -> int:
     try:
         val = int(raw)
@@ -189,8 +251,9 @@ def _coerce_quality_point(raw) -> int:
         raise ValueError("qualityPoint must be -1 or 1")
     return val
 
+
 # ======================================================
-# IMPORTANT: robust scoping that DOES NOT depend on KPI.zoneId
+# IMPORTANT: robust scoping (zoneIds + multi-zone manage KPI)
 # ======================================================
 
 def _caller_timezone_key() -> str:
@@ -203,15 +266,18 @@ def _caller_timezone_key() -> str:
     ) or {}
     return _tz_key(_employee_timezone(emp))
 
+
 def _ensure_employee_scope(employee_doc: Dict[str, Any]):
     """
     Enforces:
-      - Zone scope (employee zoneId/zone_id)
+      - Zone scope (employee.zoneId / employee.zone_id)
       - self: only caller
-      - manage: same-timezone employees only (plus zone scope)
-      - admin: bypass (still zone-scoped unless admin-all)
+      - manage: (OPTIONAL) same-timezone employees only *when subadmin has SINGLE zone*
+      - admin: bypass timezone rule (still zone-scoped unless admin-all)
     """
     mode = _kpi_mode()
+    role, zone_ids, _perms, is_admin_all = _scope()
+
     zid = _employee_zone_id(employee_doc)
     _ensure_zone_allowed(zid)
 
@@ -224,11 +290,15 @@ def _ensure_employee_scope(employee_doc: Dict[str, Any]):
         return
 
     if mode == "manage":
-        caller_tz = _caller_timezone_key()
-        target_tz = _tz_key(_employee_timezone(employee_doc))
-        if target_tz != caller_tz:
-            raise PermissionError("Forbidden: Manage KPI allows same-timezone employees only")
+        # ✅ If subadmin has MULTI-zone, allow KPI across zones even if timezone differs
+        # ✅ If SINGLE-zone, keep the old restriction (same timezone only)
+        if (not is_admin_all) and (not _is_multi_zone(zone_ids)):
+            caller_tz = _caller_timezone_key()
+            target_tz = _tz_key(_employee_timezone(employee_doc))
+            if target_tz != caller_tz:
+                raise PermissionError("Forbidden: Manage KPI allows same-timezone employees only")
         return
+
 
 def _resolve_employee_id_from_request(data: Dict[str, Any]) -> str:
     mode = _kpi_mode()
@@ -242,15 +312,17 @@ def _resolve_employee_id_from_request(data: Dict[str, Any]) -> str:
         raise ValueError("Missing employeeId")
     return emp_id
 
+
 def _allowed_employee_ids(selected_zone_id: Optional[str] = None) -> List[str]:
     """
-    For list/export (manage/admin): compute allowed employeeIds by reading employees collection.
-    This fixes “missing KPI.zoneId” legacy docs because we query KPIs by employeeId-in-scope.
+    For getAll/export:
+      - Compute allowed employeeIds from employees collection using zone scope.
+      - For manage mode: apply timezone filter ONLY when subadmin has SINGLE zone.
+      - This avoids relying on KPI.zoneId (legacy docs can be missing it).
     """
     mode = _kpi_mode()
     role, zone_ids, _perms, is_admin_all = _scope()
 
-    # self mode never calls getAll/export, but keep safe
     if mode == "self":
         eid = _caller_employee_id()
         return [eid] if eid else []
@@ -260,9 +332,12 @@ def _allowed_employee_ids(selected_zone_id: Optional[str] = None) -> List[str]:
         _ensure_zone_allowed(selected_zone_id)
 
     emp_query: Dict[str, Any] = {}
+
     if selected_zone_id:
         emp_query["$or"] = [{"zoneId": selected_zone_id}, {"zone_id": selected_zone_id}]
     elif not is_admin_all:
+        if not zone_ids:
+            return []
         emp_query["$or"] = [{"zoneId": {"$in": zone_ids}}, {"zone_id": {"$in": zone_ids}}]
 
     cursor = db.employees.find(
@@ -270,19 +345,21 @@ def _allowed_employee_ids(selected_zone_id: Optional[str] = None) -> List[str]:
         {"employeeId": 1, "timezone": 1, "tz": 1, "office": 1, "branch": 1, "location": 1, "zoneId": 1, "zone_id": 1}
     )
 
-    caller_tz = _caller_timezone_key() if mode == "manage" else None
+    apply_tz_filter = (mode == "manage") and (not is_admin_all) and (not _is_multi_zone(zone_ids))
+    caller_tz = _caller_timezone_key() if apply_tz_filter else None
 
     out: List[str] = []
     for emp in cursor:
         emp_id = (emp.get("employeeId") or "").strip()
         if not emp_id:
             continue
-        if mode == "manage":
+        if apply_tz_filter:
             if _tz_key(_employee_timezone(emp)) != caller_tz:
                 continue
         out.append(emp_id)
 
     return out
+
 
 # ======================================================
 # Legacy auto-fix (update docs once on read)
@@ -326,6 +403,7 @@ def _ensure_kpi_has_zone_and_timezone(kpi: Dict[str, Any]) -> Dict[str, Any]:
         kpi = {**kpi, **updates}
 
     return kpi
+
 
 # ======================================================
 # Output mapper
@@ -378,6 +456,7 @@ def _map_kpi_row(k: Dict[str, Any], include_punches: bool, include_last_punch: b
 
     return row
 
+
 # ======================================================
 # Routes
 # ======================================================
@@ -414,20 +493,14 @@ def addKpi():
         now_utc = _now_utc()
 
         # start date: if not provided, use "today" (local midnight)
-        try:
-            if start_str:
-                start_local = _parse_date_in_tz(start_str, "startdate", tz)
-            else:
-                start_local = _parse_date_in_tz(_as_tz(now_utc, tz).strftime("%Y-%m-%d"), "startdate", tz)
-            start_utc = start_local.astimezone(UTC)
-        except ValueError as ve:
-            return format_response(False, str(ve), None, 400)
+        if start_str:
+            start_local = _parse_date_in_tz(start_str, "startdate", tz)
+        else:
+            start_local = _parse_date_in_tz(_as_tz(now_utc, tz).strftime("%Y-%m-%d"), "startdate", tz)
+        start_utc = start_local.astimezone(UTC)
 
-        try:
-            deadline_local = _parse_eod_in_tz(deadline_str, "deadline", tz)
-            deadline_utc = deadline_local.astimezone(UTC)
-        except ValueError as ve:
-            return format_response(False, str(ve), None, 400)
+        deadline_local = _parse_eod_in_tz(deadline_str, "deadline", tz)
+        deadline_utc = deadline_local.astimezone(UTC)
 
         kpi_id = str(uuid.uuid4())
         kpi_doc = {
@@ -485,7 +558,6 @@ def updateKpi():
             if kpi.get("zoneId"):
                 _ensure_zone_allowed(kpi.get("zoneId"))
             else:
-                # if KPI is legacy and employee missing, deny for non-admin-all
                 _role, _zones, _perms, is_admin_all = _scope()
                 if not is_admin_all:
                     raise PermissionError("Forbidden")
@@ -495,20 +567,21 @@ def updateKpi():
         if (pn := (data.get("projectName") or "").strip()):
             updates["project_name"] = pn
 
-        if "startdate" in data or "startDate" in data:
-            raw_sd = (data.get("startdate") or data.get("startDate") or "").strip()
-            if raw_sd:
-                tz = _tz_from_name(kpi.get("timezone"))
-                sd_local = _parse_date_in_tz(raw_sd, "startdate", tz)
-                updates["startdate"] = sd_local.astimezone(UTC)
+        # start date update
+        raw_sd = (data.get("startdate") or data.get("startDate") or "").strip()
+        if raw_sd:
+            tz = _tz_from_name(kpi.get("timezone"))
+            sd_local = _parse_date_in_tz(raw_sd, "startdate", tz)
+            updates["startdate"] = sd_local.astimezone(UTC)
 
-        if "deadline" in data:
-            raw_dl = (data.get("deadline") or "").strip()
-            if raw_dl:
-                tz = _tz_from_name(kpi.get("timezone"))
-                dl_local = _parse_eod_in_tz(raw_dl, "deadline", tz)
-                updates["deadline"] = dl_local.astimezone(UTC)
+        # deadline update
+        raw_dl = (data.get("deadline") or "").strip()
+        if raw_dl:
+            tz = _tz_from_name(kpi.get("timezone"))
+            dl_local = _parse_eod_in_tz(raw_dl, "deadline", tz)
+            updates["deadline"] = dl_local.astimezone(UTC)
 
+        # remark update
         remark = (
             data.get("Remark/comment")
             or data.get("Remark")
@@ -613,13 +686,13 @@ def getAll():
     """
     Manager/Admin list.
     ✅ Stable zone behavior:
-      - We compute allowed employeeIds from employees collection (zone scope + manage tz rule)
-      - Then fetch KPIs by employeeId in allowed list (works even if KPI docs are missing zoneId)
-    Supports optional UI filter:
+      - Compute allowed employeeIds from employees collection (zone scope + manage rule)
+      - Fetch KPIs by employeeId in allowed list (works even if KPI docs are missing zoneId)
+    Supports:
       - zoneId
-      - employeeIds
+      - employeeIds / employeeId
       - search
-      - startDate/endDate
+      - startDate/endDate (+ tz/timezone for filtering)
       - sortBy/sortOrder
       - pagination (backend)
     """
@@ -642,10 +715,16 @@ def getAll():
                 "kpis": []
             }, 200)
 
-        # Intersect with employeeIds filter if present
-        requested_ids = _normalize_employee_ids(data.get("employeeIds", data.get("employesids")))
+        allowed_set = set(allowed_ids)
+
+        # Accept both employeeId (single) and employeeIds (list)
+        requested_ids = []
+        if (single := (data.get("employeeId") or "").strip()):
+            requested_ids = [single]
+        else:
+            requested_ids = _normalize_employee_ids(data.get("employeeIds", data.get("employesids")))
+
         if requested_ids:
-            allowed_set = set(allowed_ids)
             requested_ids = [eid for eid in requested_ids if eid in allowed_set]
             if not requested_ids:
                 return format_response(True, "KPIs retrieved", {
@@ -680,8 +759,7 @@ def getAll():
         sort_by = (data.get("sortBy") or "createdAt").strip()
         sort_order = (data.get("sortOrder") or "desc").lower()
         sort_dir = -1 if sort_order == "desc" else 1
-        allowed_sort = {"startdate", "deadline", "createdAt", "updatedAt"}
-        sort_field = sort_by if sort_by in allowed_sort else "createdAt"
+        sort_field = sort_by if sort_by in ALLOWED_SORT_FIELDS else "createdAt"
 
         total = db.kpi.count_documents(query)
         skip = (page - 1) * page_size
@@ -842,7 +920,7 @@ def add_quality_points():
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # enforce manage scope using employee (NOT kpi.zoneId/timezone alone)
+        # enforce scope using employee (NOT KPI.zoneId alone)
         emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
         if emp:
             _ensure_employee_scope(emp)
@@ -922,11 +1000,11 @@ def export_csv():
     """
     Manager/Admin export.
     ✅ Stable:
-      - Allowed employees computed from employees collection (zone + manage tz rule)
+      - Allowed employees computed from employees collection (zone + manage rule)
       - KPI fetched by employeeId in allowed list (works even if KPI docs miss zoneId)
     Supports:
       - zoneId, employeeIds/employeeId
-      - search, startDate/endDate
+      - search, startDate/endDate (+ tz/timezone)
       - sortBy/sortOrder
       - all/exportAll to export everything
       - pagination params (if not exporting all)
@@ -939,12 +1017,16 @@ def export_csv():
         selected_zone_id = (data.get("zoneId") or "").strip() or None
         allowed_ids = _allowed_employee_ids(selected_zone_id)
         if not allowed_ids:
-            # return empty csv
+            # return empty csv (still a valid download)
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(["EmployeeName", "EmployeeId", "ZoneId", "ProjectName", "Timezone",
-                             "StartDate", "Deadline", "Remark", "DeadlinePoints", "QualityPoints",
-                             "LastPunchDate", "LastPunchStatus", "LastPunchRemark"])
+            writer.writerow([
+                "EmployeeName", "EmployeeId", "ZoneId",
+                "ProjectName", "Timezone",
+                "StartDate", "Deadline",
+                "Remark", "DeadlinePoints", "QualityPoints",
+                "LastPunchDate", "LastPunchStatus", "LastPunchRemark"
+            ])
             resp = make_response(output.getvalue())
             resp.headers["Content-Type"] = "text/csv; charset=utf-8"
             resp.headers["Content-Disposition"] = 'attachment; filename="kpi_export.csv"'
@@ -952,15 +1034,13 @@ def export_csv():
 
         allowed_set = set(allowed_ids)
 
+        # accept employeeId (single) and employeeIds (list)
         emp_single = (data.get("employeeId") or "").strip()
         emp_list = _normalize_employee_ids(data.get("employeeIds"))
 
-        filtered_emp_ids: List[str] = []
+        filtered_emp_ids: List[str]
         if emp_single:
-            if emp_single in allowed_set:
-                filtered_emp_ids = [emp_single]
-            else:
-                filtered_emp_ids = []
+            filtered_emp_ids = [emp_single] if emp_single in allowed_set else []
         elif emp_list:
             filtered_emp_ids = [x for x in emp_list if x in allowed_set]
         else:
@@ -974,7 +1054,12 @@ def export_csv():
         search = (data.get("search") or "").strip()
         if search:
             rx = {"$regex": re.escape(search), "$options": "i"}
-            query["$or"] = [{"project_name": rx}, {"projectName": rx}, {"employeeName": rx}, {"employeeId": rx}]
+            query["$or"] = [
+                {"project_name": rx},
+                {"projectName": rx},
+                {"employeeName": rx},
+                {"employeeId": rx}
+            ]
 
         sd = (data.get("startDate") or "").strip()
         ed = (data.get("endDate") or "").strip()
@@ -986,11 +1071,9 @@ def export_csv():
         sort_by = (data.get("sortBy") or "createdAt").strip()
         sort_order = (data.get("sortOrder") or "desc").lower()
         sort_dir = -1 if sort_order == "desc" else 1
-        allowed_sort = {"startdate", "deadline", "createdAt", "updatedAt"}
-        sort_field = sort_by if sort_by in allowed_sort else "createdAt"
+        sort_field = sort_by if sort_by in ALLOWED_SORT_FIELDS else "createdAt"
 
         export_all = bool(data.get("all") or data.get("exportAll"))
-
         page = max(int(data.get("page", 1)), 1)
         page_size = max(int(data.get("pageSize", 10)), 1)
 
