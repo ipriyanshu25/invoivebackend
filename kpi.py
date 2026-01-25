@@ -2,7 +2,7 @@ import re
 import uuid
 import csv, io
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, request, make_response
@@ -15,6 +15,13 @@ kpi_bp = Blueprint("kpi", __name__, url_prefix="/kpi")
 
 UTC = ZoneInfo("UTC")
 DEFAULT_TZ = ZoneInfo("Asia/Kolkata")
+
+# If you have legacy timezone names in DB, map them to canonical ones
+TZ_ALIASES = {
+    "Asia/Calcutta": "Asia/Kolkata",
+    "US/Pacific": "America/Los_Angeles",
+    "PST8PDT": "America/Los_Angeles",
+}
 
 OFFICE_TZ_MAP = {
     "india": "Asia/Kolkata",
@@ -30,39 +37,38 @@ OFFICE_TZ_MAP = {
 }
 
 # ======================================================
-# Auth / Scope Helpers (ZONE + KPI rules)
+# JWT / Permission / Zone helpers
 # ======================================================
 
-def _scope():
+def _claims() -> Dict[str, Any]:
+    return get_jwt() or {}
+
+def _scope() -> Tuple[str, List[str], Dict[str, Any], bool]:
     """
-    JWT claims expected:
+    JWT expected:
       role: admin/subadmin/employee...
-      zoneIds: list of allowed zoneIds (admin can be ["*"] or empty)
-      employeeId: caller employeeId (for subadmin and employee)
-      permissions: dict with "KPI" and/or "Manage KPI"
+      zoneIds: ["..."] or ["*"] or [] for admin-all
+      employeeId: caller employeeId
+      permissions: {"KPI":1, "Manage KPI":1, ...}
     """
-    claims = get_jwt() or {}
-    role = (claims.get("role") or "").lower()
-    zone_ids = claims.get("zoneIds") or []
-    perms = claims.get("permissions") or {}
+    c = _claims()
+    role = (c.get("role") or "").lower()
+    zone_ids = c.get("zoneIds") or []
+    perms = c.get("permissions") or {}
     is_admin_all = role == "admin" and (not zone_ids or "*" in zone_ids)
     return role, zone_ids, perms, is_admin_all
 
 def _caller_employee_id() -> str:
-    claims = get_jwt() or {}
-    return (claims.get("employeeId") or "").strip()
+    return (_claims().get("employeeId") or "").strip()
 
-def _kpi_mode():
+def _kpi_mode() -> str:
     """
     Returns:
-      - "admin"  : role == admin
-      - "manage" : Manage KPI permission
-      - "self"   : KPI permission only (self-only)
+      - admin  : role == admin
+      - manage : permissions["Manage KPI"] == 1
+      - self   : permissions["KPI"] == 1
     """
-    claims = get_jwt() or {}
-    role = (claims.get("role") or "").lower()
-    perms = claims.get("permissions") or {}
-
+    role, _zone_ids, perms, _admin_all = _scope()
     if role == "admin":
         return "admin"
     if int(perms.get("Manage KPI", 0)) == 1:
@@ -72,20 +78,10 @@ def _kpi_mode():
     raise PermissionError("Permission denied (KPI)")
 
 def _require_manage_kpi():
-    """Only Admin or Manage KPI can access."""
-    mode = _kpi_mode()
-    if mode not in ("admin", "manage"):
+    if _kpi_mode() not in ("admin", "manage"):
         raise PermissionError("Permission denied (Manage KPI required)")
 
-def _zone_query(field="zoneId") -> dict:
-    """Mongo filter enforcing zone scope."""
-    _role, zone_ids, _perms, is_admin_all = _scope()
-    if is_admin_all:
-        return {}
-    return {field: {"$in": zone_ids}}
-
 def _ensure_zone_allowed(zone_id: Optional[str]):
-    """Raise 403 if zone_id not in caller zone scope (unless admin-all)."""
     _role, zone_ids, _perms, is_admin_all = _scope()
     if is_admin_all:
         return
@@ -93,7 +89,7 @@ def _ensure_zone_allowed(zone_id: Optional[str]):
         raise PermissionError("Forbidden (different zone)")
 
 # ======================================================
-# Timezone Helpers (UTC storage)
+# Timezone / Date helpers (store UTC)
 # ======================================================
 
 def _now_utc() -> datetime:
@@ -102,28 +98,32 @@ def _now_utc() -> datetime:
 def _tz_from_name(name: Optional[str]) -> ZoneInfo:
     if not name:
         return DEFAULT_TZ
+    name = TZ_ALIASES.get(name, name)
     try:
         return ZoneInfo(name)
     except Exception:
         return DEFAULT_TZ
 
 def _tz_key(tz: ZoneInfo) -> str:
-    return getattr(tz, "key", str(tz))
+    key = getattr(tz, "key", str(tz))
+    return TZ_ALIASES.get(key, key)
 
-def _employee_timezone(employee: Dict[str, Any]) -> ZoneInfo:
-    tz_name = employee.get("timezone") or employee.get("tz")
+def _employee_zone_id(emp: Dict[str, Any]) -> Optional[str]:
+    zid = (emp.get("zoneId") or emp.get("zone_id") or "").strip()
+    return zid or None
+
+def _employee_timezone(emp: Dict[str, Any]) -> ZoneInfo:
+    tz_name = (emp.get("timezone") or emp.get("tz") or "").strip()
     if tz_name:
         return _tz_from_name(tz_name)
 
-    office = (employee.get("office") or employee.get("branch") or employee.get("location") or "").strip().lower()
+    office = (emp.get("office") or emp.get("branch") or emp.get("location") or "").strip().lower()
     for key, tz in OFFICE_TZ_MAP.items():
         if key in office:
             return ZoneInfo(tz)
-
     return DEFAULT_TZ
 
 def _as_utc(dt):
-    """Ensure datetime is UTC aware. If naive, treat as UTC (legacy)."""
     if not isinstance(dt, datetime):
         return dt
     if dt.tzinfo is None:
@@ -132,6 +132,15 @@ def _as_utc(dt):
 
 def _as_tz(dt, tz: ZoneInfo):
     return _as_utc(dt).astimezone(tz) if isinstance(dt, datetime) else dt
+
+def _fmt_date_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d"):
+    return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
+
+def _fmt_dt_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d %H:%M:%S"):
+    return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
+
+def _fmt_iso_in_tz(dt, tz: ZoneInfo):
+    return _as_tz(dt, tz).isoformat() if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
 
 def _parse_date_in_tz(s: str, field_name: str, tz: ZoneInfo) -> datetime:
     """YYYY-MM-DD -> tz-aware local midnight"""
@@ -147,20 +156,14 @@ def _end_of_day_local(local_dt: datetime) -> datetime:
 def _parse_eod_in_tz(s: str, field_name: str, tz: ZoneInfo) -> datetime:
     return _end_of_day_local(_parse_date_in_tz(s, field_name, tz))
 
-def _fmt_date_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d"):
-    return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
-
-def _fmt_dt_in_tz(dt, tz: ZoneInfo, f="%Y-%m-%d %H:%M:%S"):
-    return _as_tz(dt, tz).strftime(f) if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
-
-def _fmt_iso_in_tz(dt, tz: ZoneInfo):
-    return _as_tz(dt, tz).isoformat() if isinstance(dt, datetime) else (dt if isinstance(dt, str) else None)
-
-def _parse_filter_range_to_utc(sd: str, ed: str, tz: ZoneInfo):
-    """Parse start/end in request timezone -> convert to UTC inclusive range."""
+def _parse_filter_range_to_utc(sd: str, ed: str, tz: ZoneInfo) -> Tuple[datetime, datetime]:
     start_local = _parse_date_in_tz(sd, "startDate", tz)
     end_local = _parse_eod_in_tz(ed, "endDate", tz)
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
+
+# ======================================================
+# ID + validation helpers
+# ======================================================
 
 def _normalize_employee_ids(raw) -> List[str]:
     if raw is None:
@@ -177,7 +180,7 @@ def _normalize_employee_ids(raw) -> List[str]:
         return [p for p in parts if p]
     return []
 
-def _coerce_quality_point(raw):
+def _coerce_quality_point(raw) -> int:
     try:
         val = int(raw)
     except Exception:
@@ -187,57 +190,47 @@ def _coerce_quality_point(raw):
     return val
 
 # ======================================================
-# KPI Permission Logic (SELF vs MANAGE by TIMEZONE)
+# IMPORTANT: robust scoping that DOES NOT depend on KPI.zoneId
 # ======================================================
 
 def _caller_timezone_key() -> str:
-    """
-    Caller timezone derived from employees collection via JWT employeeId.
-    Used for Manage KPI filtering (same-timezone employees only).
-    """
     emp_id = _caller_employee_id()
     if not emp_id:
         return _tz_key(DEFAULT_TZ)
-
     emp = db.employees.find_one(
         {"employeeId": emp_id},
         {"timezone": 1, "tz": 1, "office": 1, "branch": 1, "location": 1}
     ) or {}
+    return _tz_key(_employee_timezone(emp))
 
-    tz = _employee_timezone(emp)
-    return _tz_key(tz)
-
-def _ensure_employee_scope(employee_doc: dict):
+def _ensure_employee_scope(employee_doc: Dict[str, Any]):
     """
     Enforces:
-      - ZONE scope
-      - KPI/self  -> only caller's own employeeId
-      - Manage KPI -> only employees with SAME timezone as caller
-      - Admin -> bypass (still zone scoped unless admin-all)
+      - Zone scope (employee zoneId/zone_id)
+      - self: only caller
+      - manage: same-timezone employees only (plus zone scope)
+      - admin: bypass (still zone-scoped unless admin-all)
     """
     mode = _kpi_mode()
-
-    # Always enforce zone scope (unless admin-all)
-    _ensure_zone_allowed(employee_doc.get("zoneId"))
+    zid = _employee_zone_id(employee_doc)
+    _ensure_zone_allowed(zid)
 
     if mode == "admin":
         return
 
     if mode == "self":
-        if employee_doc.get("employeeId") != _caller_employee_id():
+        if (employee_doc.get("employeeId") or "") != _caller_employee_id():
             raise PermissionError("Forbidden: KPI permission allows self-only")
+        return
 
     if mode == "manage":
         caller_tz = _caller_timezone_key()
         target_tz = _tz_key(_employee_timezone(employee_doc))
         if target_tz != caller_tz:
             raise PermissionError("Forbidden: Manage KPI allows same-timezone employees only")
+        return
 
-def _resolve_employee_id_from_request(data: dict) -> str:
-    """
-    If mode=self -> force employeeId from JWT.
-    Else -> take from request.
-    """
+def _resolve_employee_id_from_request(data: Dict[str, Any]) -> str:
     mode = _kpi_mode()
     if mode == "self":
         emp_id = _caller_employee_id()
@@ -249,31 +242,82 @@ def _resolve_employee_id_from_request(data: dict) -> str:
         raise ValueError("Missing employeeId")
     return emp_id
 
+def _allowed_employee_ids(selected_zone_id: Optional[str] = None) -> List[str]:
+    """
+    For list/export (manage/admin): compute allowed employeeIds by reading employees collection.
+    This fixes “missing KPI.zoneId” legacy docs because we query KPIs by employeeId-in-scope.
+    """
+    mode = _kpi_mode()
+    role, zone_ids, _perms, is_admin_all = _scope()
+
+    # self mode never calls getAll/export, but keep safe
+    if mode == "self":
+        eid = _caller_employee_id()
+        return [eid] if eid else []
+
+    if selected_zone_id:
+        selected_zone_id = selected_zone_id.strip()
+        _ensure_zone_allowed(selected_zone_id)
+
+    emp_query: Dict[str, Any] = {}
+    if selected_zone_id:
+        emp_query["$or"] = [{"zoneId": selected_zone_id}, {"zone_id": selected_zone_id}]
+    elif not is_admin_all:
+        emp_query["$or"] = [{"zoneId": {"$in": zone_ids}}, {"zone_id": {"$in": zone_ids}}]
+
+    cursor = db.employees.find(
+        emp_query,
+        {"employeeId": 1, "timezone": 1, "tz": 1, "office": 1, "branch": 1, "location": 1, "zoneId": 1, "zone_id": 1}
+    )
+
+    caller_tz = _caller_timezone_key() if mode == "manage" else None
+
+    out: List[str] = []
+    for emp in cursor:
+        emp_id = (emp.get("employeeId") or "").strip()
+        if not emp_id:
+            continue
+        if mode == "manage":
+            if _tz_key(_employee_timezone(emp)) != caller_tz:
+                continue
+        out.append(emp_id)
+
+    return out
+
 # ======================================================
-# Legacy Auto-fix (safe migration on read)
+# Legacy auto-fix (update docs once on read)
 # ======================================================
 
 def _ensure_kpi_has_zone_and_timezone(kpi: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    If old KPI docs are missing zoneId/timezone, derive from employee and update once.
-    """
-    updates = {}
-    zone_id = kpi.get("zoneId")
-    tz_name = kpi.get("timezone")
+    updates: Dict[str, Any] = {}
 
-    if (not zone_id) or (not tz_name):
+    # normalize project field
+    if not kpi.get("project_name") and kpi.get("projectName"):
+        updates["project_name"] = kpi.get("projectName")
+
+    # normalize remark field
+    if kpi.get("remark") is None and kpi.get("Remark") is not None:
+        updates["remark"] = kpi.get("Remark")
+
+    # canonicalize timezone name
+    if kpi.get("timezone"):
+        canon = TZ_ALIASES.get(kpi["timezone"], kpi["timezone"])
+        if canon != kpi["timezone"]:
+            updates["timezone"] = canon
+
+    # fill missing zoneId/timezone/employeeName from employee
+    if (not kpi.get("zoneId")) or (not kpi.get("timezone")) or (not kpi.get("employeeName")):
         emp = db.employees.find_one(
             {"employeeId": kpi.get("employeeId")},
-            {"zoneId": 1, "timezone": 1, "tz": 1, "office": 1, "branch": 1, "location": 1, "name": 1}
+            {"zoneId": 1, "zone_id": 1, "timezone": 1, "tz": 1, "office": 1, "branch": 1, "location": 1, "name": 1}
         )
         if emp:
-            if not zone_id and emp.get("zoneId"):
-                zone_id = emp.get("zoneId")
-                updates["zoneId"] = zone_id
-            if not tz_name:
-                tz = _employee_timezone(emp)
-                tz_name = _tz_key(tz)
-                updates["timezone"] = tz_name
+            if not kpi.get("zoneId"):
+                zid = _employee_zone_id(emp)
+                if zid:
+                    updates["zoneId"] = zid
+            if not kpi.get("timezone"):
+                updates["timezone"] = _tz_key(_employee_timezone(emp))
             if not kpi.get("employeeName") and emp.get("name"):
                 updates["employeeName"] = emp.get("name")
 
@@ -282,6 +326,57 @@ def _ensure_kpi_has_zone_and_timezone(kpi: Dict[str, Any]) -> Dict[str, Any]:
         kpi = {**kpi, **updates}
 
     return kpi
+
+# ======================================================
+# Output mapper
+# ======================================================
+
+def _map_kpi_row(k: Dict[str, Any], include_punches: bool, include_last_punch: bool) -> Dict[str, Any]:
+    k = _ensure_kpi_has_zone_and_timezone(k)
+    tz = _tz_from_name(k.get("timezone"))
+
+    punches = k.get("punches", []) or []
+    last = punches[-1] if punches else {}
+
+    proj = k.get("project_name") or k.get("projectName") or ""
+    rem = k.get("remark") if k.get("remark") is not None else (k.get("Remark") or "")
+
+    row = {
+        "kpiId": k.get("kpiId"),
+        "zoneId": k.get("zoneId"),
+        "employeeId": k.get("employeeId"),
+        "employeeName": k.get("employeeName"),
+        "projectName": proj,
+        "timezone": _tz_key(tz),
+
+        "startdate": _fmt_date_in_tz(k.get("startdate"), tz),
+        "deadline": _fmt_date_in_tz(k.get("deadline"), tz),
+
+        # keep both keys so old frontend mapping never breaks
+        "remark": rem,
+        "Remark": rem,
+
+        "points": k.get("points"),
+        "qualityPoints": k.get("qualityPoints"),
+        "createdAt": _fmt_iso_in_tz(k.get("createdAt"), tz),
+        "updatedAt": _fmt_iso_in_tz(k.get("updatedAt"), tz),
+    }
+
+    if include_last_punch:
+        lp = last.get("punchDate")
+        row["lastPunchDate"] = _fmt_dt_in_tz(lp, tz) if lp else None
+        row["lastPunchStatus"] = last.get("status")
+        row["lastPunchRemark"] = last.get("remark")
+
+    if include_punches:
+        row["punches"] = [{
+            "punchDate": _fmt_dt_in_tz(p.get("punchDate"), tz),
+            "remark": p.get("remark"),
+            "status": p.get("status"),
+            "pointChange": p.get("pointChange"),
+        } for p in punches]
+
+    return row
 
 # ======================================================
 # Routes
@@ -295,8 +390,16 @@ def addKpi():
 
         employee_id = _resolve_employee_id_from_request(data)
         project_name = (data.get("projectName") or "").strip()
+        start_str = (data.get("startdate") or data.get("startDate") or "").strip()
         deadline_str = (data.get("deadline") or "").strip()
-        remark = data.get("Remark/comment") or data.get("Remark") or data.get("comment") or ""
+
+        remark = (
+            data.get("Remark/comment")
+            or data.get("Remark")
+            or data.get("comment")
+            or data.get("remark")
+            or ""
+        )
 
         if not project_name or not deadline_str:
             return format_response(False, "Missing required fields: projectName, deadline", None, 400)
@@ -305,11 +408,20 @@ def addKpi():
         if not employee:
             return format_response(False, "Employee not found", None, 404)
 
-        # ✅ enforce self-only OR same-timezone OR admin
         _ensure_employee_scope(employee)
 
         tz = _employee_timezone(employee)
         now_utc = _now_utc()
+
+        # start date: if not provided, use "today" (local midnight)
+        try:
+            if start_str:
+                start_local = _parse_date_in_tz(start_str, "startdate", tz)
+            else:
+                start_local = _parse_date_in_tz(_as_tz(now_utc, tz).strftime("%Y-%m-%d"), "startdate", tz)
+            start_utc = start_local.astimezone(UTC)
+        except ValueError as ve:
+            return format_response(False, str(ve), None, 400)
 
         try:
             deadline_local = _parse_eod_in_tz(deadline_str, "deadline", tz)
@@ -320,17 +432,15 @@ def addKpi():
         kpi_id = str(uuid.uuid4())
         kpi_doc = {
             "kpiId": kpi_id,
-            "zoneId": employee.get("zoneId"),
+            "zoneId": _employee_zone_id(employee),
             "employeeId": employee_id,
             "employeeName": employee.get("name"),
             "project_name": project_name,
 
-            # store UTC
-            "startdate": now_utc,
-            "deadline": deadline_utc,
+            "startdate": start_utc,     # UTC datetime
+            "deadline": deadline_utc,   # UTC datetime
 
-            # remember intended timezone (for display + manager filtering)
-            "timezone": _tz_key(tz),
+            "timezone": _tz_key(tz),    # canonical tz key used for display only
 
             "remark": remark,
             "points": -1,
@@ -366,31 +476,47 @@ def updateKpi():
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # ✅ enforce zone + self/manage rules based on KPI employee
-        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")}) or {}
+        # enforce permission against KPI's employee
+        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
         if emp:
             _ensure_employee_scope(emp)
         else:
-            # fallback: at least enforce zone
-            _ensure_zone_allowed(kpi.get("zoneId"))
+            # fallback to KPI zone (if present)
+            if kpi.get("zoneId"):
+                _ensure_zone_allowed(kpi.get("zoneId"))
+            else:
+                # if KPI is legacy and employee missing, deny for non-admin-all
+                _role, _zones, _perms, is_admin_all = _scope()
+                if not is_admin_all:
+                    raise PermissionError("Forbidden")
 
-        updates = {}
+        updates: Dict[str, Any] = {}
 
-        if "projectName" in data and (data.get("projectName") or "").strip():
-            updates["project_name"] = data.get("projectName").strip()
+        if (pn := (data.get("projectName") or "").strip()):
+            updates["project_name"] = pn
 
-        remark = data.get("Remark/comment") or data.get("Remark") or data.get("comment")
+        if "startdate" in data or "startDate" in data:
+            raw_sd = (data.get("startdate") or data.get("startDate") or "").strip()
+            if raw_sd:
+                tz = _tz_from_name(kpi.get("timezone"))
+                sd_local = _parse_date_in_tz(raw_sd, "startdate", tz)
+                updates["startdate"] = sd_local.astimezone(UTC)
+
+        if "deadline" in data:
+            raw_dl = (data.get("deadline") or "").strip()
+            if raw_dl:
+                tz = _tz_from_name(kpi.get("timezone"))
+                dl_local = _parse_eod_in_tz(raw_dl, "deadline", tz)
+                updates["deadline"] = dl_local.astimezone(UTC)
+
+        remark = (
+            data.get("Remark/comment")
+            or data.get("Remark")
+            or data.get("comment")
+            or data.get("remark")
+        )
         if remark is not None:
             updates["remark"] = remark
-
-        # deadline update uses KPI timezone for consistency
-        if "deadline" in data and (data.get("deadline") or "").strip():
-            tz = _tz_from_name(kpi.get("timezone"))
-            try:
-                dl_local = _parse_eod_in_tz(data["deadline"].strip(), "deadline", tz)
-                updates["deadline"] = dl_local.astimezone(UTC)
-            except ValueError as ve:
-                return format_response(False, str(ve), None, 400)
 
         if not updates:
             return format_response(False, "No fields to update", None, 400)
@@ -402,6 +528,8 @@ def updateKpi():
 
     except PermissionError as e:
         return format_response(False, str(e), None, 403)
+    except ValueError as e:
+        return format_response(False, str(e), None, 400)
     except Exception:
         return format_response(False, "Internal server error", None, 500)
 
@@ -421,14 +549,19 @@ def punchKpi():
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # ✅ enforce zone + self/manage rules based on KPI employee
-        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")}) or {}
+        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
         if emp:
             _ensure_employee_scope(emp)
         else:
-            _ensure_zone_allowed(kpi.get("zoneId"))
+            if kpi.get("zoneId"):
+                _ensure_zone_allowed(kpi.get("zoneId"))
+            else:
+                _role, _zones, _perms, is_admin_all = _scope()
+                if not is_admin_all:
+                    raise PermissionError("Forbidden")
 
         now_utc = _now_utc()
+
         deadline = kpi.get("deadline")
         on_time = isinstance(deadline, datetime) and (now_utc <= _as_utc(deadline))
 
@@ -443,8 +576,8 @@ def punchKpi():
         status = "On Time" if on_time else "Late Submission"
 
         punch_record = {
-            "punchDate": now_utc,  # store UTC
-            "remark": data.get("remark", "") or "",
+            "punchDate": now_utc,  # stored UTC
+            "remark": (data.get("remark") or "").strip(),
             "pointChange": change,
             "status": status,
         }
@@ -479,51 +612,71 @@ def punchKpi():
 def getAll():
     """
     Manager/Admin list.
-    - Manage KPI: only same-timezone KPIs (within zone scope)
-    - Admin: all KPIs within zone scope (or all zones if admin-all)
+    ✅ Stable zone behavior:
+      - We compute allowed employeeIds from employees collection (zone scope + manage tz rule)
+      - Then fetch KPIs by employeeId in allowed list (works even if KPI docs are missing zoneId)
+    Supports optional UI filter:
+      - zoneId
+      - employeeIds
+      - search
+      - startDate/endDate
+      - sortBy/sortOrder
+      - pagination (backend)
     """
     try:
         _require_manage_kpi()
-
         data = request.get_json(force=True) or {}
 
-        # Pagination
-        try:
-            page = max(int(data.get("page", 1)), 1)
-            page_size = max(int(data.get("pageSize", 10)), 1)
-        except (TypeError, ValueError):
-            return format_response(False, "Invalid pagination parameters", None, 400)
+        selected_zone_id = (data.get("zoneId") or "").strip() or None
 
-        filter_tz = _tz_from_name(data.get("tz") or data.get("timezone"))
+        page = max(int(data.get("page", 1)), 1)
+        page_size = max(int(data.get("pageSize", 10)), 1)
 
-        query = {}
-        query.update(_zone_query("zoneId"))
+        allowed_ids = _allowed_employee_ids(selected_zone_id)
+        if not allowed_ids:
+            return format_response(True, "KPIs retrieved", {
+                "page": page,
+                "pageSize": page_size,
+                "total": 0,
+                "totalPages": 0,
+                "kpis": []
+            }, 200)
 
-        # ✅ Manage KPI: same timezone only (KPI docs store timezone)
-        if _kpi_mode() == "manage":
-            query["timezone"] = _caller_timezone_key()
+        # Intersect with employeeIds filter if present
+        requested_ids = _normalize_employee_ids(data.get("employeeIds", data.get("employesids")))
+        if requested_ids:
+            allowed_set = set(allowed_ids)
+            requested_ids = [eid for eid in requested_ids if eid in allowed_set]
+            if not requested_ids:
+                return format_response(True, "KPIs retrieved", {
+                    "page": page,
+                    "pageSize": page_size,
+                    "total": 0,
+                    "totalPages": 0,
+                    "kpis": []
+                }, 200)
 
-        # Search
+        query: Dict[str, Any] = {"employeeId": {"$in": requested_ids or allowed_ids}}
+
+        # search
         if (s := (data.get("search") or "").strip()):
             rx = {"$regex": re.escape(s), "$options": "i"}
-            query["$or"] = [{"project_name": rx}, {"employeeName": rx}, {"employeeId": rx}]
+            query["$or"] = [
+                {"project_name": rx},
+                {"projectName": rx},    # legacy
+                {"employeeName": rx},
+                {"employeeId": rx},
+            ]
 
-        # Employee IDs filter
-        employee_ids = _normalize_employee_ids(data.get("employeeIds", data.get("employesids")))
-        if employee_ids:
-            query["employeeId"] = {"$in": employee_ids}
-
-        # Date range filter (on startdate stored UTC)
+        # date filter (on startdate)
         sd = (data.get("startDate") or "").strip()
         ed = (data.get("endDate") or "").strip()
         if sd and ed:
-            try:
-                start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, filter_tz)
-            except ValueError as ve:
-                return format_response(False, str(ve), None, 400)
+            filter_tz = _tz_from_name(data.get("tz") or data.get("timezone"))
+            start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, filter_tz)
             query["startdate"] = {"$gte": start_utc, "$lte": end_utc}
 
-        # Sorting
+        # sort
         sort_by = (data.get("sortBy") or "createdAt").strip()
         sort_order = (data.get("sortOrder") or "desc").lower()
         sort_dir = -1 if sort_order == "desc" else 1
@@ -543,47 +696,7 @@ def getAll():
         include_punches = bool(data.get("includePunches"))
         include_last_punch = bool(data.get("includeLastPunch", True))
 
-        out = []
-        for k in cursor:
-            k = _ensure_kpi_has_zone_and_timezone(k)
-
-            tz = _tz_from_name(k.get("timezone"))
-            punches = k.get("punches", []) or []
-            last = punches[-1] if punches else {}
-
-            row = {
-                "kpiId": k.get("kpiId"),
-                "zoneId": k.get("zoneId"),
-                "employeeId": k.get("employeeId"),
-                "employeeName": k.get("employeeName"),
-                "projectName": k.get("project_name"),
-                "timezone": _tz_key(tz),
-
-                "startdate": _fmt_date_in_tz(k.get("startdate"), tz),
-                "deadline": _fmt_date_in_tz(k.get("deadline"), tz),
-
-                "Remark": k.get("remark"),
-                "points": k.get("points"),
-                "qualityPoints": k.get("qualityPoints"),
-                "createdAt": _fmt_iso_in_tz(k.get("createdAt"), tz),
-                "updatedAt": _fmt_iso_in_tz(k.get("updatedAt"), tz),
-            }
-
-            if include_last_punch:
-                lp = last.get("punchDate")
-                row["lastPunchDate"] = _fmt_dt_in_tz(lp, tz) if lp else None
-                row["lastPunchStatus"] = last.get("status")
-                row["lastPunchRemark"] = last.get("remark")
-
-            if include_punches:
-                row["punches"] = [{
-                    "punchDate": _fmt_dt_in_tz(p.get("punchDate"), tz),
-                    "remark": p.get("remark"),
-                    "status": p.get("status"),
-                    "pointChange": p.get("pointChange"),
-                } for p in punches]
-
-            out.append(row)
+        out = [_map_kpi_row(k, include_punches, include_last_punch) for k in cursor]
 
         return format_response(True, "KPIs retrieved", {
             "page": page,
@@ -595,6 +708,8 @@ def getAll():
 
     except PermissionError as e:
         return format_response(False, str(e), None, 403)
+    except ValueError as e:
+        return format_response(False, str(e), None, 400)
     except Exception:
         return format_response(False, "Internal server error", None, 500)
 
@@ -603,7 +718,7 @@ def getAll():
 @jwt_required()
 def getByKpiId(kpi_id):
     try:
-        _kpi_mode()
+        _kpi_mode()  # must have KPI access (self/manage/admin)
 
         kpi = db.kpi.find_one({"kpiId": kpi_id})
         if not kpi:
@@ -611,40 +726,19 @@ def getByKpiId(kpi_id):
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # ✅ enforce zone + self/manage rules based on KPI employee
-        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")}) or {}
+        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
         if emp:
             _ensure_employee_scope(emp)
         else:
-            _ensure_zone_allowed(kpi.get("zoneId"))
+            # fallback: enforce KPI.zoneId if present
+            if kpi.get("zoneId"):
+                _ensure_zone_allowed(kpi.get("zoneId"))
+            else:
+                _role, _zones, _perms, is_admin_all = _scope()
+                if not is_admin_all:
+                    raise PermissionError("Forbidden")
 
-        tz = _tz_from_name(kpi.get("timezone"))
-        punches = kpi.get("punches", []) or []
-
-        payload = {
-            "kpiId": kpi.get("kpiId"),
-            "zoneId": kpi.get("zoneId"),
-            "employeeId": kpi.get("employeeId"),
-            "employeeName": kpi.get("employeeName"),
-            "projectName": kpi.get("project_name"),
-            "timezone": _tz_key(tz),
-
-            "startdate": _fmt_dt_in_tz(kpi.get("startdate"), tz),
-            "deadline": _fmt_dt_in_tz(kpi.get("deadline"), tz),
-
-            "Remark": kpi.get("remark"),
-            "points": kpi.get("points"),
-            "qualityPoints": kpi.get("qualityPoints"),
-            "createdAt": _fmt_iso_in_tz(kpi.get("createdAt"), tz),
-            "updatedAt": _fmt_iso_in_tz(kpi.get("updatedAt"), tz),
-            "punches": [{
-                "punchDate": _fmt_dt_in_tz(p.get("punchDate"), tz),
-                "remark": p.get("remark"),
-                "status": p.get("status"),
-                "pointChange": p.get("pointChange"),
-            } for p in punches]
-        }
-
+        payload = _map_kpi_row(kpi, include_punches=True, include_last_punch=True)
         return format_response(True, "KPI retrieved", payload, 200)
 
     except PermissionError as e:
@@ -657,10 +751,11 @@ def getByKpiId(kpi_id):
 @jwt_required()
 def getByEmployeeId():
     """
-    KPI/self:
-      - only own employeeId (forced from JWT)
-    Manage KPI/Admin:
-      - can query employeeId, but must pass same-timezone (manage) + zone checks
+    self:
+      - employeeId forced from JWT
+    manage/admin:
+      - can query employeeId, but must pass _ensure_employee_scope(employee)
+    Pagination is backend.
     """
     try:
         data = request.get_json(force=True) or {}
@@ -680,30 +775,19 @@ def getByEmployeeId():
         if not employee:
             return format_response(False, "Employee not found", None, 404)
 
-        # ✅ enforce self/manage rules and zone
         _ensure_employee_scope(employee)
 
-        emp_tz = _employee_timezone(employee)
-
-        query = {
-            "employeeId": employee_id,
-            "zoneId": employee.get("zoneId"),
-        }
-
-        # Manage KPI: ensure KPI docs are same timezone too
-        if mode == "manage":
-            query["timezone"] = _caller_timezone_key()
+        query: Dict[str, Any] = {"employeeId": employee_id}
 
         if (s := (data.get("search") or "").strip()):
-            query["project_name"] = {"$regex": re.escape(s), "$options": "i"}
+            rx = {"$regex": re.escape(s), "$options": "i"}
+            query["$or"] = [{"project_name": rx}, {"projectName": rx}]
 
         sd = (data.get("startDate") or "").strip()
         ed = (data.get("endDate") or "").strip()
         if sd and ed:
-            try:
-                start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, emp_tz)
-            except ValueError as ve:
-                return format_response(False, str(ve), None, 400)
+            emp_tz = _employee_timezone(employee)
+            start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, emp_tz)
             query["startdate"] = {"$gte": start_utc, "$lte": end_utc}
 
         page = max(int(data.get("page", 1)), 1)
@@ -718,36 +802,10 @@ def getByEmployeeId():
                 .limit(page_size)
         )
 
-        out = []
-        for k in cursor:
-            k = _ensure_kpi_has_zone_and_timezone(k)
-            tz = _tz_from_name(k.get("timezone")) or emp_tz
-            punches = k.get("punches", []) or []
+        include_punches = bool(data.get("includePunches"))
+        include_last_punch = bool(data.get("includeLastPunch", True))
 
-            out.append({
-                "kpiId": k.get("kpiId"),
-                "zoneId": k.get("zoneId"),
-                "employeeId": k.get("employeeId"),
-                "employeeName": k.get("employeeName"),
-                "projectName": k.get("project_name"),
-                "timezone": _tz_key(tz),
-
-                "startdate": _fmt_dt_in_tz(k.get("startdate"), tz),
-                "deadline": _fmt_dt_in_tz(k.get("deadline"), tz),
-
-                "Remark": k.get("remark"),
-                "points": k.get("points"),
-                "qualityPoints": k.get("qualityPoints"),
-                "createdAt": _fmt_iso_in_tz(k.get("createdAt"), tz),
-                "updatedAt": _fmt_iso_in_tz(k.get("updatedAt"), tz),
-
-                "punches": [{
-                    "punchDate": _fmt_dt_in_tz(p.get("punchDate"), tz),
-                    "remark": p.get("remark"),
-                    "status": p.get("status"),
-                    "pointChange": p.get("pointChange"),
-                } for p in punches]
-            })
+        out = [_map_kpi_row(k, include_punches, include_last_punch) for k in cursor]
 
         return format_response(True, f"Found {len(out)} KPI(s) for employee {employee_id}", {
             "page": page,
@@ -767,7 +825,7 @@ def getByEmployeeId():
 @jwt_required()
 def add_quality_points():
     try:
-        _require_manage_kpi()  # ✅ only admin/manage
+        _require_manage_kpi()
 
         data = request.get_json(force=True) or {}
         kpi_id = (data.get("kpiId") or data.get("kpi_id") or "").strip()
@@ -784,12 +842,17 @@ def add_quality_points():
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # ✅ enforce manage timezone scope + zone scope
-        if _kpi_mode() == "manage":
-            if kpi.get("timezone") != _caller_timezone_key():
-                raise PermissionError("Forbidden: Manage KPI allows same-timezone employees only")
-
-        _ensure_zone_allowed(kpi.get("zoneId"))
+        # enforce manage scope using employee (NOT kpi.zoneId/timezone alone)
+        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
+        if emp:
+            _ensure_employee_scope(emp)
+        else:
+            if kpi.get("zoneId"):
+                _ensure_zone_allowed(kpi.get("zoneId"))
+            else:
+                _role, _zones, _perms, is_admin_all = _scope()
+                if not is_admin_all:
+                    raise PermissionError("Forbidden")
 
         now_utc = _now_utc()
         db.kpi.update_one(
@@ -817,7 +880,7 @@ def add_quality_points():
 @jwt_required()
 def deleteKpi():
     try:
-        _require_manage_kpi()  # ✅ only admin/manage
+        _require_manage_kpi()
 
         data = request.get_json(force=True) or {}
         kpi_id = (data.get("kpiId") or "").strip()
@@ -830,12 +893,16 @@ def deleteKpi():
 
         kpi = _ensure_kpi_has_zone_and_timezone(kpi)
 
-        # ✅ enforce manage timezone scope + zone scope
-        if _kpi_mode() == "manage":
-            if kpi.get("timezone") != _caller_timezone_key():
-                raise PermissionError("Forbidden: Manage KPI allows same-timezone employees only")
-
-        _ensure_zone_allowed(kpi.get("zoneId"))
+        emp = db.employees.find_one({"employeeId": kpi.get("employeeId")})
+        if emp:
+            _ensure_employee_scope(emp)
+        else:
+            if kpi.get("zoneId"):
+                _ensure_zone_allowed(kpi.get("zoneId"))
+            else:
+                _role, _zones, _perms, is_admin_all = _scope()
+                if not is_admin_all:
+                    raise PermissionError("Forbidden")
 
         res = db.kpi.delete_one({"kpiId": kpi_id})
         if not res.deleted_count:
@@ -854,21 +921,67 @@ def deleteKpi():
 def export_csv():
     """
     Manager/Admin export.
-    Manage KPI:
-      - only same-timezone KPIs (within zone scope)
-    Admin:
-      - all KPIs in zone scope (or all zones if admin-all)
+    ✅ Stable:
+      - Allowed employees computed from employees collection (zone + manage tz rule)
+      - KPI fetched by employeeId in allowed list (works even if KPI docs miss zoneId)
+    Supports:
+      - zoneId, employeeIds/employeeId
+      - search, startDate/endDate
+      - sortBy/sortOrder
+      - all/exportAll to export everything
+      - pagination params (if not exporting all)
     """
     try:
         _require_manage_kpi()
 
         data = request.get_json(force=True) or {}
 
+        selected_zone_id = (data.get("zoneId") or "").strip() or None
+        allowed_ids = _allowed_employee_ids(selected_zone_id)
+        if not allowed_ids:
+            # return empty csv
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["EmployeeName", "EmployeeId", "ZoneId", "ProjectName", "Timezone",
+                             "StartDate", "Deadline", "Remark", "DeadlinePoints", "QualityPoints",
+                             "LastPunchDate", "LastPunchStatus", "LastPunchRemark"])
+            resp = make_response(output.getvalue())
+            resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+            resp.headers["Content-Disposition"] = 'attachment; filename="kpi_export.csv"'
+            return resp
+
+        allowed_set = set(allowed_ids)
+
+        emp_single = (data.get("employeeId") or "").strip()
+        emp_list = _normalize_employee_ids(data.get("employeeIds"))
+
+        filtered_emp_ids: List[str] = []
+        if emp_single:
+            if emp_single in allowed_set:
+                filtered_emp_ids = [emp_single]
+            else:
+                filtered_emp_ids = []
+        elif emp_list:
+            filtered_emp_ids = [x for x in emp_list if x in allowed_set]
+        else:
+            filtered_emp_ids = allowed_ids
+
+        if not filtered_emp_ids:
+            return format_response(False, "No employees allowed for export", None, 403)
+
+        query: Dict[str, Any] = {"employeeId": {"$in": filtered_emp_ids}}
+
         search = (data.get("search") or "").strip()
+        if search:
+            rx = {"$regex": re.escape(search), "$options": "i"}
+            query["$or"] = [{"project_name": rx}, {"projectName": rx}, {"employeeName": rx}, {"employeeId": rx}]
+
         sd = (data.get("startDate") or "").strip()
         ed = (data.get("endDate") or "").strip()
-
-        filter_tz = _tz_from_name(data.get("tz") or data.get("timezone"))
+        if sd and ed:
+            filter_tz = _tz_from_name(data.get("tz") or data.get("timezone"))
+            start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, filter_tz)
+            query["startdate"] = {"$gte": start_utc, "$lte": end_utc}
 
         sort_by = (data.get("sortBy") or "createdAt").strip()
         sort_order = (data.get("sortOrder") or "desc").lower()
@@ -876,40 +989,14 @@ def export_csv():
         allowed_sort = {"startdate", "deadline", "createdAt", "updatedAt"}
         sort_field = sort_by if sort_by in allowed_sort else "createdAt"
 
-        page = max(int(data.get("page", 1)), 1)
-        page_size = max(int(data.get("pageSize", 10)), 1)
         export_all = bool(data.get("all") or data.get("exportAll"))
 
-        query = {}
-        query.update(_zone_query("zoneId"))
-
-        # ✅ Manage KPI: same timezone only
-        if _kpi_mode() == "manage":
-            query["timezone"] = _caller_timezone_key()
-
-        emp_single = (data.get("employeeId") or "").strip()
-        emp_list = _normalize_employee_ids(data.get("employeeIds"))
-
-        if emp_single:
-            query["employeeId"] = emp_single
-        elif emp_list:
-            query["employeeId"] = {"$in": emp_list}
-
-        if search:
-            rx = {"$regex": re.escape(search), "$options": "i"}
-            query["$or"] = [{"project_name": rx}, {"employeeName": rx}, {"employeeId": rx}]
-
-        if sd and ed:
-            try:
-                start_utc, end_utc = _parse_filter_range_to_utc(sd, ed, filter_tz)
-            except ValueError as ve:
-                return format_response(False, str(ve), None, 400)
-            query["startdate"] = {"$gte": start_utc, "$lte": end_utc}
+        page = max(int(data.get("page", 1)), 1)
+        page_size = max(int(data.get("pageSize", 10)), 1)
 
         cursor = db.kpi.find(query).sort(sort_field, sort_dir)
         if not export_all:
-            skip = (page - 1) * page_size
-            cursor = cursor.skip(skip).limit(page_size)
+            cursor = cursor.skip((page - 1) * page_size).limit(page_size)
 
         fieldnames = [
             "EmployeeName", "EmployeeId", "ZoneId",
@@ -930,17 +1017,20 @@ def export_csv():
             last = punches[-1] if punches else {}
             lp_date = last.get("punchDate")
 
+            proj = k.get("project_name") or k.get("projectName") or ""
+            rem = k.get("remark") if k.get("remark") is not None else (k.get("Remark") or "")
+
             writer.writerow({
-                "EmployeeName": k.get("employeeName", ""),
-                "EmployeeId": k.get("employeeId", ""),
-                "ZoneId": k.get("zoneId", ""),
-                "ProjectName": k.get("project_name", ""),
+                "EmployeeName": k.get("employeeName", "") or "",
+                "EmployeeId": k.get("employeeId", "") or "",
+                "ZoneId": k.get("zoneId", "") or "",
+                "ProjectName": proj,
                 "Timezone": _tz_key(tz),
 
                 "StartDate": _fmt_dt_in_tz(k.get("startdate"), tz) or "",
                 "Deadline": _fmt_dt_in_tz(k.get("deadline"), tz) or "",
 
-                "Remark": k.get("remark", ""),
+                "Remark": rem,
                 "DeadlinePoints": k.get("points", ""),
                 "QualityPoints": k.get("qualityPoints", ""),
 
