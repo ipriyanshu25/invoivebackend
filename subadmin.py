@@ -1,242 +1,265 @@
 import re
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from flask import Blueprint, request
 from werkzeug.security import generate_password_hash, check_password_hash
-from db import db  # MongoDB connection for employees, subadmin, admin collections
+from flask_jwt_extended import jwt_required, get_jwt, create_access_token
+
+from db import db
 from utils import format_response
 
-# Blueprint for subadmin routes
-subadmin_bp = Blueprint('subadmin', __name__, url_prefix='/subadmin')
+subadmin_bp = Blueprint("subadmin", __name__, url_prefix="/subadmin")
+UTC = ZoneInfo("UTC")
 
-# Permission mapping: JSON field -> human-readable
-# Permission mapping: JSON field -> human-readable
 PERMISSIONS = {
-    'View payslip details':     'View payslip details',
-    'Generate payslip':         'Generate payslip',
-    'View Invoice details':     'View Invoice details',
-    'Generate invoice details': 'Generate invoice details',
-    'Add Employee Details':     'Add Employee details',
-    'View Employee Details':    'View employee details',
-    'Manage KPI':               'Manage KPI',
-    'KPI':                      'KPI',            # <-- added field
+    "View payslip details":     "View payslip details",
+    "Generate payslip":         "Generate payslip",
+    "View Invoice details":     "View Invoice details",
+    "Generate invoice details": "Generate invoice details",
+    "Add Employee Details":     "Add Employee details",
+    "View Employee Details":    "View employee details",
+    "Manage KPI":               "Manage KPI",
+    "KPI":                      "KPI",
 }
 
+PASSWORD_REGEX = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$")
 
-# Password complexity: uppercase, lowercase, digit, special char, min length 8
-PASSWORD_REGEX = re.compile(
-    r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$'
-)
+def _now_utc():
+    return datetime.now(UTC)
 
+def _require_admin():
+    claims = get_jwt() or {}
+    if (claims.get("role") or "").lower() != "admin":
+        raise PermissionError("Admin only")
 
-@subadmin_bp.route('/register', methods=['POST'])
+def _validate_zone_ids(zone_ids: list[str]) -> bool:
+    if not isinstance(zone_ids, list) or not zone_ids:
+        return False
+    count = db.zones.count_documents({"zoneId": {"$in": zone_ids}, "isActive": True})
+    return count == len(zone_ids)
+
+@subadmin_bp.route("/register", methods=["POST"])
+@jwt_required()
 def register_subadmin():
     try:
-        data = request.get_json() or {}
-        admin_id    = data.get('adminid')
-        employee_id = data.get('employeeid')
-        username    = data.get('username')
-        password    = data.get('password')
-        perms       = data.get('permissions', {})
+        _require_admin()
+        data = request.get_json(force=True) or {}
 
-        if not all([admin_id, employee_id, username, password]):
-            return format_response(
-                False,
-                'Missing required fields: adminid, employeeid, username, or password',
-                status=400
-            )
+        employee_id = (data.get("employeeid") or "").strip()
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+        perms = data.get("permissions", {}) or {}
+        zone_ids = data.get("zoneIds")  # optional
 
-        # verify admin exists
-        if not db.admin.find_one({'adminId': admin_id}):
-            return format_response(False, 'Invalid adminId', status=403)
+        if not all([employee_id, username, password]):
+            return format_response(False, "Missing fields: employeeid, username, password", None, 400)
 
-        # password complexity
         if not PASSWORD_REGEX.match(password):
-            return format_response(
-                False,
-                'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
-                status=400
-            )
+            return format_response(False, "Password must include upper, lower, number, special char (min 8).", None, 400)
 
-        # verify employee exists
-        if not db.employees.find_one({'employeeId': employee_id}):
-            return format_response(False, 'No such employee', status=404)
+        # verify employee exists + has zoneId
+        emp = db.employees.find_one({"employeeId": employee_id}, {"zoneId": 1})
+        if not emp:
+            return format_response(False, "No such employee", None, 404)
+
+        emp_zone = emp.get("zoneId")
+        if not emp_zone:
+            return format_response(False, "Employee has no zoneId assigned", None, 400)
+
+        # default zoneIds to employee zone if not provided
+        if not zone_ids:
+            zone_ids = [emp_zone]
+
+        if not _validate_zone_ids(zone_ids):
+            return format_response(False, "One or more zoneIds invalid/inactive", None, 400)
 
         # ensure no existing subadmin for this employee
-        if db.subadmin.find_one({'employeeId': employee_id}):
-            return format_response(
-                False,
-                'Subadmin credentials already exist for this employee, please login',
-                status=409
-            )
+        if db.subadmin.find_one({"employeeId": employee_id}):
+            return format_response(False, "Subadmin already exists for this employee", None, 409)
 
-        # ensure unique username
-        if db.subadmin.find_one({'username': username}):
-            return format_response(False, 'Username already taken', status=409)
+        if db.subadmin.find_one({"username": username}):
+            return format_response(False, "Username already taken", None, 409)
 
-        # hash password and build permissions flags
         pw_hash = generate_password_hash(password)
-        permission_flags = {
-            key: int(bool(perms.get(key)))
-            for key in PERMISSIONS.keys()
-        }
-        subadmin_id = str(uuid.uuid4())
+        permission_flags = {k: int(bool(perms.get(k))) for k in PERMISSIONS.keys()}
 
-        # insert record
+        subadmin_id = str(uuid.uuid4())
+        now = _now_utc()
+
         db.subadmin.insert_one({
-            'subadminId': subadmin_id,
-            'employeeId': employee_id,
-            'username': username,
-            'password_hash': pw_hash,
-            'permissions': permission_flags
+            "subadminId": subadmin_id,
+            "employeeId": employee_id,
+            "username": username,
+            "password_hash": pw_hash,
+            "permissions": permission_flags,
+            "zoneIds": zone_ids,
+            "isActive": True,
+            "createdAt": now,
+            "updatedAt": now
         })
 
-        return format_response(
-            True,
-            'Subadmin registered successfully',
-            data={'subadminId': subadmin_id}
-        )
+        return format_response(True, "Subadmin registered", {"subadminId": subadmin_id}, 201)
 
+    except PermissionError as e:
+        return format_response(False, str(e), None, 403)
     except Exception:
-        return format_response(False, 'Internal server error', status=500)
+        return format_response(False, "Internal server error", None, 500)
 
-
-@subadmin_bp.route('/updaterecord', methods=['POST'])
+@subadmin_bp.route("/updaterecord", methods=["POST"])
+@jwt_required()
 def update_subadmin():
     try:
-        data = request.get_json() or {}
-        subadmin_id = data.get('subadminId')
-        updates     = data.get('updates', {})
+        _require_admin()
+        data = request.get_json(force=True) or {}
+        subadmin_id = (data.get("subadminId") or "").strip()
+        updates = data.get("updates", {}) or {}
 
         if not subadmin_id:
-            return format_response(False, 'subadminId is required', status=400)
+            return format_response(False, "subadminId is required", None, 400)
 
-        existing = db.subadmin.find_one({'subadminId': subadmin_id})
+        existing = db.subadmin.find_one({"subadminId": subadmin_id})
         if not existing:
-            return format_response(False, 'Subadmin not found', status=404)
+            return format_response(False, "Subadmin not found", None, 404)
 
         update_fields = {}
 
-        # username change
-        if 'username' in updates:
-            new_username = updates['username']
-            if db.subadmin.find_one({
-                'username': new_username,
-                'subadminId': {'$ne': subadmin_id}
-            }):
-                return format_response(False, 'Username already in use', status=409)
-            update_fields['username'] = new_username
+        if "username" in updates:
+            new_username = (updates.get("username") or "").strip()
+            if not new_username:
+                return format_response(False, "username cannot be empty", None, 400)
+            clash = db.subadmin.find_one({"username": new_username, "subadminId": {"$ne": subadmin_id}})
+            if clash:
+                return format_response(False, "Username already in use", None, 409)
+            update_fields["username"] = new_username
 
-        # password change
-        if 'password' in updates:
-            new_password = updates['password']
+        if "password" in updates:
+            new_password = updates.get("password") or ""
             if not PASSWORD_REGEX.match(new_password):
-                return format_response(
-                    False,
-                    'Password must be at least 8 chars and include uppercase, lowercase, number, special char',
-                    status=400
-                )
-            update_fields['password_hash'] = generate_password_hash(new_password)
+                return format_response(False, "Password must include upper, lower, number, special char (min 8).", None, 400)
+            update_fields["password_hash"] = generate_password_hash(new_password)
 
-        # permissions update (including "Manage KPI")
-        if 'permissions' in updates:
-            perms = updates['permissions']
-            update_fields['permissions'] = {
-                key: int(bool(perms.get(key)))
-                for key in PERMISSIONS.keys()
-            }
+        if "permissions" in updates:
+            perms = updates.get("permissions") or {}
+            update_fields["permissions"] = {k: int(bool(perms.get(k))) for k in PERMISSIONS.keys()}
+
+        if "zoneIds" in updates:
+            zone_ids = updates.get("zoneIds")
+            if not _validate_zone_ids(zone_ids):
+                return format_response(False, "One or more zoneIds invalid/inactive", None, 400)
+            update_fields["zoneIds"] = zone_ids
+
+        if "isActive" in updates:
+            update_fields["isActive"] = bool(updates["isActive"])
 
         if not update_fields:
-            return format_response(False, 'No valid fields to update', status=400)
+            return format_response(False, "No valid fields to update", None, 400)
 
-        db.subadmin.update_one(
-            {'subadminId': subadmin_id},
-            {'$set': update_fields}
-        )
-        return format_response(True, 'Subadmin updated successfully')
+        update_fields["updatedAt"] = _now_utc()
 
+        db.subadmin.update_one({"subadminId": subadmin_id}, {"$set": update_fields})
+        return format_response(True, "Subadmin updated successfully", None, 200)
+
+    except PermissionError as e:
+        return format_response(False, str(e), None, 403)
     except Exception:
-        return format_response(False, 'Internal server error', status=500)
+        return format_response(False, "Internal server error", None, 500)
 
-
-@subadmin_bp.route('/deleterecord', methods=['POST'])
+@subadmin_bp.route("/deleterecord", methods=["POST"])
+@jwt_required()
 def delete_subadmin():
     try:
-        data = request.get_json() or {}
-        subadmin_id = data.get('subadminId')
-
+        _require_admin()
+        data = request.get_json(force=True) or {}
+        subadmin_id = (data.get("subadminId") or "").strip()
         if not subadmin_id:
-            return format_response(False, 'subadminId is required', status=400)
+            return format_response(False, "subadminId is required", None, 400)
 
-        result = db.subadmin.delete_one({'subadminId': subadmin_id})
-        if result.deleted_count == 0:
-            return format_response(False, 'Subadmin not found', status=404)
+        res = db.subadmin.delete_one({"subadminId": subadmin_id})
+        if not res.deleted_count:
+            return format_response(False, "Subadmin not found", None, 404)
 
-        return format_response(True, 'Subadmin deleted successfully')
+        return format_response(True, "Subadmin deleted", None, 200)
 
+    except PermissionError as e:
+        return format_response(False, str(e), None, 403)
     except Exception:
-        return format_response(False, 'Internal server error', status=500)
+        return format_response(False, "Internal server error", None, 500)
 
-
-@subadmin_bp.route('/getlist', methods=['POST'])
+@subadmin_bp.route("/getlist", methods=["POST"])
+@jwt_required()
 def get_subadmin_list():
     try:
-        data = request.get_json() or {}
-        page      = int(data.get('page', 1))
-        page_size = int(data.get('pageSize', 10))
-        search    = (data.get('search') or '').strip()
+        _require_admin()
+        data = request.get_json(force=True) or {}
+        page = max(int(data.get("page", 1)), 1)
+        page_size = max(int(data.get("pageSize", 10)), 1)
+        search = (data.get("search") or "").strip()
 
         query = {}
         if search:
-            query['$or'] = [
-                {'username':   {'$regex': search, '$options': 'i'}},
-                {'employeeId': {'$regex': search, '$options': 'i'}}
+            query["$or"] = [
+                {"username": {"$regex": re.escape(search), "$options": "i"}},
+                {"employeeId": {"$regex": re.escape(search), "$options": "i"}},
+                {"subadminId": {"$regex": re.escape(search), "$options": "i"}},
             ]
 
         total = db.subadmin.count_documents(query)
-        subadmins = list(
-            db.subadmin.find(
-                query,
-                {'_id': 0, 'password_hash': 0}
-            )
-            .skip((page - 1) * page_size)
-            .limit(page_size)
-        )
+        cursor = (db.subadmin.find(query, {"_id": 0, "password_hash": 0})
+                  .skip((page - 1) * page_size)
+                  .limit(page_size))
 
-        payload = {
-            'subadmins': subadmins,
-            'total':     total,
-            'page':      page,
-            'pageSize':  page_size
-        }
-        return format_response(
-            True,
-            'Subadmin list retrieved successfully',
-            data=payload
-        )
+        return format_response(True, "Subadmin list fetched", {
+            "subadmins": list(cursor),
+            "total": total,
+            "page": page,
+            "pageSize": page_size
+        }, 200)
 
+    except PermissionError as e:
+        return format_response(False, str(e), None, 403)
     except Exception:
-        return format_response(False, 'Internal server error', status=500)
+        return format_response(False, "Internal server error", None, 500)
 
-
-@subadmin_bp.route('/login', methods=['POST'])
+@subadmin_bp.route("/login", methods=["POST"])
 def login_subadmin():
     try:
-        data     = request.get_json() or {}
-        username = data.get('username')
-        password = data.get('password')
+        data = request.get_json(force=True) or {}
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
 
-        if not all([username, password]):
-            return format_response(False, 'Missing username or password', status=400)
+        if not username or not password:
+            return format_response(False, "Missing username or password", None, 400)
 
-        user = db.subadmin.find_one({'username': username})
-        if not user or not check_password_hash(user['password_hash'], password):
-            return format_response(False, 'Invalid credentials', status=401)
+        user = db.subadmin.find_one({"username": username, "isActive": True})
+        if not user or not check_password_hash(user["password_hash"], password):
+            return format_response(False, "Invalid credentials", None, 401)
 
-        resp = {
-            'role':        'subadmin',
-            'permissions': user.get('permissions', {})
+        zone_ids = user.get("zoneIds") or []
+        if not zone_ids:
+            emp = db.employees.find_one({"employeeId": user.get("employeeId")}, {"zoneId": 1})
+            if emp and emp.get("zoneId"):
+                zone_ids = [emp["zoneId"]]
+
+        claims = {
+            "role": "subadmin",
+            "subadminId": user.get("subadminId"),
+            "employeeId": user.get("employeeId"),
+            "permissions": user.get("permissions", {}),
+            "zoneIds": zone_ids
         }
-        return format_response(True, 'Login successful', data=resp)
+
+        token = create_access_token(identity=user.get("subadminId"), additional_claims=claims)
+
+        return format_response(True, "Login successful", {
+            "role": "subadmin",
+            "subadminId": user.get("subadminId"),
+            "employeeId": user.get("employeeId"),
+            "permissions": user.get("permissions", {}),
+            "zoneIds": zone_ids,
+            "token": token
+        }, 200)
 
     except Exception:
-        return format_response(False, 'Internal server error', status=500)
+        return format_response(False, "Internal server error", None, 500)
