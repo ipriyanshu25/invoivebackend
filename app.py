@@ -11,7 +11,7 @@ from subadmin import subadmin_bp
 from employee import employee_bp
 from kpi import kpi_bp
 from zones import zones_bp
-
+from datetime import timedelta
 from salaryslip import salary_bp
 from invoiceMHD import invoice_bp
 from invoiceEnoylity import invoice_enoylity_bp
@@ -25,6 +25,8 @@ CORS(app)
 # ✅ JWT
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_SUPER_SECRET")
 app.config["JWT_TOKEN_LOCATION"] = ["headers"]
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=7)
+
 jwt = JWTManager(app)
 
 # ✅ register blueprints
